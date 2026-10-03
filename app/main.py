@@ -1,4 +1,5 @@
 import json
+import os
 import uuid
 import datetime
 from typing import List, Optional
@@ -19,7 +20,21 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Configure CORS
+# Allowed CORS Origins for Production & Local Development
+allowed_origins = [
+    "https://ai-teacher-question-generator-front.vercel.app",
+    "https://ai-teacher-question-generator-front.vercel.app/",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173"
+]
+
+frontend_env = os.getenv("FRONTEND_URL")
+if frontend_env:
+    allowed_origins.append(frontend_env.strip().replace(/\/+$/, ''))
+
+# Configure CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -36,6 +51,7 @@ def read_root():
         "message": "Welcome to TeachGenie AI Question Paper Generator API"
     }
 
+@app.get("/health")
 @app.get("/api/health")
 def health_check():
     return {"status": "healthy", "timestamp": datetime.datetime.utcnow().isoformat()}
@@ -44,7 +60,6 @@ def health_check():
 
 @app.post("/api/auth/register", response_model=schemas.Token)
 def register_user(user_in: schemas.UserRegister, db: Session = Depends(get_db)):
-    # Check if user already exists
     existing = db.query(models.User).filter(models.User.email == user_in.email.lower()).first()
     if existing:
         raise HTTPException(status_code=400, detail="An account with this email already exists.")
@@ -107,7 +122,6 @@ def get_me(current_user: models.User = Depends(auth.get_current_user)):
 def forgot_password(req: schemas.ForgotPasswordRequest, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.email == req.email.lower()).first()
     if not user:
-        # Don't leak user existence
         return {"message": "If that email exists in our records, password reset instructions have been sent."}
     return {"message": "Password reset email sent successfully. Please check your inbox for instructions."}
 
@@ -175,7 +189,6 @@ async def upload_document(
         
     doc_title = title or (file_name if file_name else "Chapter Content")
     
-    # Save document record in DB under current user
     doc_record = models.Document(
         user_id=current_user.id,
         title=doc_title,
@@ -222,7 +235,6 @@ def generate_questions(
     if not chapter_text or len(chapter_text.strip()) < 20:
         raise HTTPException(status_code=400, detail="Chapter content is empty or contains insufficient text.")
 
-    # Call AI Generation Engine
     generated_data = ai_engine.generate_questions_from_chapter(
         chapter_title=req.chapter_title,
         chapter_text=chapter_text,
