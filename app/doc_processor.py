@@ -22,29 +22,43 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
             page_lines_list.append(lines)
 
         # Detect repeated lines across pages (headers & footers) if multi-page
+        # Normalize lines by removing trailing digits/page numbers so "Title 2" and "Title 3" match
         line_occurrences = {}
         if num_pages > 1:
             for lines in page_lines_list:
-                unique_lines = set(lines)
-                for l in unique_lines:
-                    line_occurrences[l] = line_occurrences.get(l, 0) + 1
+                normalized_lines = set()
+                for l in lines:
+                    norm = re.sub(r'[\d\s•|\-\.]+$', '', l, flags=re.IGNORECASE).strip()
+                    norm = re.sub(r'^(?:page\s*\d+|chapter\s*\d+|part\s*\d+)', '', norm, flags=re.IGNORECASE).strip()
+                    if len(norm) > 3:
+                        normalized_lines.add(norm.lower())
+                for norm in normalized_lines:
+                    line_occurrences[norm] = line_occurrences.get(norm, 0) + 1
                     
         cleaned_pages = []
         for lines in page_lines_list:
             cleaned_page_lines = []
             for line in lines:
-                # Filter out lines appearing on >50% of pages in multi-page PDF
-                if num_pages > 1 and line_occurrences.get(line, 0) > num_pages / 2:
+                norm = re.sub(r'[\d\s•|\-\.]+$', '', line, flags=re.IGNORECASE).strip()
+                norm = re.sub(r'^(?:page\s*\d+|chapter\s*\d+|part\s*\d+)', '', norm, flags=re.IGNORECASE).strip().lower()
+                
+                # Filter out lines appearing on >30% of pages in multi-page PDF
+                if num_pages > 1 and norm and line_occurrences.get(norm, 0) > max(1, num_pages * 0.3):
                     continue
                 # Filter out standalone page numbers & common metadata lines
                 if re.match(r'^(page\s*\d+(\s*of\s*\d+)?|\d+)$', line, re.IGNORECASE):
                     continue
+                # Filter out running titles like "The Garden Beyond the Stars 2." or "The Clockmaker of Riverton 4"
+                if re.match(r'^[A-Z][A-Za-z0-9\s\-_:\'",.]{3,60}\s+\d{1,3}\.?$', line):
+                    continue
+                    
                 cleaned_page_lines.append(line)
             
             if cleaned_page_lines:
                 cleaned_pages.append("\n".join(cleaned_page_lines))
 
         full_text = "\n\n".join(cleaned_pages)
+        full_text = clean_text(full_text)
         logger.info(f"Extracted PDF text: {num_pages} pages, {len(full_text)} chars")
         return full_text
     except Exception as e:
@@ -112,14 +126,20 @@ def process_uploaded_document(file: UploadFile, file_bytes: bytes) -> Tuple[str,
     return extracted_text, word_count
 
 def clean_text(text: str) -> str:
-    """Clean unneeded white spaces, control characters, PDF page numbers, and testing headers."""
+    """Clean unneeded white spaces, control characters, PDF page headers, and testing footers."""
     if not text:
         return ""
     text = re.sub(r'[\r\t]', ' ', text)
+    # Ensure newlines between paragraphs have period boundaries if missing
+    text = re.sub(r'(?<=[^\n.!?])\n+(?=[A-Z0-9])', '. ', text)
+    # Remove lines ending with page numbers like "Story Title 1", "The Clockmaker of Riverton 2."
+    text = re.sub(r'^[^\n]*?\b\d+\s*\.?\s*$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^[^\n]+?\s*•?\s*Page\s*\d+.*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
     text = re.sub(r'Page\s+\d+(\s+of\s+\d+)?', '', text, flags=re.IGNORECASE)
     text = re.sub(r'Prepared as a sample document.*?\.', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'for testing PDF upload.*?\.', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'A ten-part short story for testing.*?\.', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'for testing PDF.*?\.', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'A ten-part short story.*?\.', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'A ten-chapter mystery story.*?\.', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r' {2,}', ' ', text)
     return text.strip()

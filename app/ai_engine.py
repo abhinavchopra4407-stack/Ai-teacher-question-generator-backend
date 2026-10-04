@@ -7,7 +7,7 @@ import urllib.request
 from typing import List, Dict, Any, Optional
 
 from app.config import settings
-from app.doc_processor import chunk_text_if_needed
+from app.doc_processor import chunk_text_if_needed, clean_text
 
 logger = logging.getLogger("ai_engine")
 
@@ -92,27 +92,33 @@ def extract_grounded_answer_from_text(question_text: str, topic: str, chapter_te
     if not chapter_text or not chapter_text.strip():
         return f"Refer to the core concepts outlined in {topic}."
 
-    cleaned = chapter_text.strip()
-    # Remove PDF page numbers and boilerplate header noise
-    cleaned = re.sub(r'Page\s+\d+(\s+of\s+\d+)?', '', cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r'Prepared as a sample document.*?\.', '', cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r'for testing PDF upload.*?\.', '', cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r'A ten-part short story for testing.*?\.', '', cleaned, flags=re.IGNORECASE)
+    cleaned = clean_text(chapter_text)
+    # Remove chapter numbering like "1. ", "2. " from beginning of lines
+    cleaned = re.sub(r'^\d+\.\s*', '', cleaned, flags=re.MULTILINE)
 
     sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', cleaned) if len(s.strip()) > 15]
     
-    # Filter out sentences that look like metadata/headers
+    # Filter out sentences that look like metadata/headers/page numbers
     filtered_sentences = []
     for s in sentences:
         s_lower = s.lower()
-        if any(bad in s_lower for bad in ["sample document", "testing pdf", "page 1", "page 2", "for project testing"]):
+        if any(bad in s_lower for bad in ["sample document", "testing pdf", "page 1", "page 2", "page 3", "page 4", "page 5", "page 6", "page 7", "page 8", "page 9", "page 10", "for project testing"]):
+            continue
+        # Skip sentences ending with a bare digit/page number like "The Clockmaker of Riverton 2." or "Garden Beyond the Stars 3."
+        if re.search(r'\b\d+\s*\.?\s*$', s):
+            continue
+        # Skip title headers / section headings (short sentence without main verbs)
+        words_in_s = s.split()
+        if len(words_in_s) <= 8 and not any(v in s_lower for v in ["is", "was", "are", "were", "had", "have", "been", "came", "went", "stood", "looked", "found", "lived", "worked", "opened", "said", "stopped", "ran", "saw", "built", "turned", "smelled", "blamed", "spent", "entered", "placed", "asked", "changed", "sent", "spoke", "returned", "vanished", "leaving", "looked", "admitted", "remembered", "listed", "cleaned", "studied", "measured"]):
+            continue
+        if re.search(r'^\d+\.\s+[A-Z]', s): # Skip chapter headers like "1. The Shop at the End"
             continue
         filtered_sentences.append(s)
 
     if not filtered_sentences:
         filtered_sentences = sentences or [cleaned]
 
-    stop_words = {"what", "is", "the", "define", "key", "term", "presented", "in", "chapter", "how", "why", "explain", "of", "and", "a", "to", "or", "regarding", "as", "described", "text", "which", "state", "outline", "list", "compare", "contrast", "page", "short", "story"}
+    stop_words = {"what", "is", "the", "define", "key", "term", "presented", "in", "chapter", "how", "why", "explain", "of", "and", "a", "to", "or", "regarding", "as", "described", "text", "which", "state", "outline", "list", "compare", "contrast", "page", "short", "story", "10", "page"}
     words = re.findall(r'\w+', (question_text + " " + topic).lower())
     keywords = [w for w in words if len(w) > 3 and w not in stop_words]
 
@@ -656,6 +662,13 @@ def generate_fallback_questions(
     and answers for each section so that every question tests a different part of the document!
     """
     cleaned_full = chapter_text.strip()
+
+    # Clean chapter title string if it contains filename noise like "10 page story" or ".pdf"
+    clean_title = re.sub(r'\s*\d+\s*page\s*story.*$', '', chapter_title, flags=re.IGNORECASE)
+    clean_title = re.sub(r'\.pdf$', '', clean_title, flags=re.IGNORECASE)
+    clean_title = clean_title.replace('_', ' ').replace('-', ' ').strip().title()
+    if not clean_title:
+        clean_title = "The Chapter"
     
     # Split by double newline or sentence groups into distinct paragraph blocks
     raw_paras = [p.strip() for p in re.split(r'\n\n+', cleaned_full) if len(p.strip()) > 30]
@@ -666,25 +679,24 @@ def generate_fallback_questions(
     if not raw_paras:
         raw_paras = [cleaned_full]
 
-    # Ensure we have distinct paragraph chunks by splitting large paragraphs if needed
-    paragraphs = []
-    for p in raw_paras:
-        if len(p.split()) > 100:
-            s_list = [s.strip() for s in re.split(r'(?<=[.!?])\s+', p) if len(s.strip()) > 10]
-            if len(s_list) >= 2:
-                mid = len(s_list) // 2
-                paragraphs.append(" ".join(s_list[:mid]))
-                paragraphs.append(" ".join(s_list[mid:]))
+    paragraphs = list(raw_paras)
+    # Ensure we have at least 9 distinct paragraph/sentence blocks so all 9 questions get unique content
+    if len(paragraphs) < 9:
+        fine_paragraphs = []
+        for p in paragraphs:
+            s_list = [s.strip() for s in re.split(r'(?<=[.!?])\s+', p) if len(s.strip()) > 15]
+            if len(s_list) > 1:
+                fine_paragraphs.extend(s_list)
             else:
-                paragraphs.append(p)
-        else:
-            paragraphs.append(p)
+                fine_paragraphs.append(p)
+        if len(fine_paragraphs) >= 3:
+            paragraphs = fine_paragraphs
 
     num_paras = len(paragraphs)
 
     def get_unique_section_topic(p_text: str, p_idx: int) -> str:
-        stop_words = {"lighthouse", "moonbay", "chapter", "section", "story", "the", "this", "that", "where", "which", "would", "could", "should", "about", "testing", "stands", "found", "with", "from", "they", "there"}
-        words = re.findall(r'\b[A-Za-z]{4,}\b', p_text)
+        stop_words = {"lighthouse", "moonbay", "chapter", "section", "story", "the", "this", "that", "where", "which", "would", "could", "should", "about", "testing", "stands", "found", "with", "from", "they", "there", "page", "story", "when", "into", "through", "tucked", "edge", "stood", "tucked", "small", "carried", "inserted"}
+        words = re.findall(r'\b[A-Z][a-z]{3,}\b|\b[a-z]{4,}\b', p_text)
         unique_words = []
         for w in words:
             if w.lower() not in stop_words and w.lower() not in [u.lower() for u in unique_words]:
@@ -693,11 +705,17 @@ def generate_fallback_questions(
                 break
         if unique_words:
             return " ".join(unique_words).title()
-        return f"Passage {p_idx + 1} Event"
+        return f"Key Event {p_idx + 1}"
 
     vs_marks = marks_dist.get("very_short", 2) if marks_dist else 2
     s_marks = marks_dist.get("short", 4) if marks_dist else 4
     l_marks = marks_dist.get("long", 8) if marks_dist else 8
+
+    vs_templates = [
+        "What specific detail is stated regarding {topic} in the text?",
+        "According to the text, what key fact is revealed about {topic}?",
+        "Briefly state what is described concerning {topic} in the chapter."
+    ]
 
     vs_list = []
     for i in range(3):
@@ -705,7 +723,7 @@ def generate_fallback_questions(
         p_content = paragraphs[p_idx]
         topic = get_unique_section_topic(p_content, p_idx)
         
-        q_text = f"According to the text '{chapter_title}', what specific detail is stated regarding {topic}?"
+        q_text = vs_templates[i % len(vs_templates)].format(topic=topic)
         ans = extract_grounded_answer_from_text(q_text, topic, p_content, max_words=25)
         
         vs_list.append({
@@ -721,13 +739,19 @@ def generate_fallback_questions(
             "expected_length": "1 - 10 words"
         })
 
+    sq_templates = [
+        "Explain the significance of {topic} as presented in the chapter narrative.",
+        "How is {topic} described in the text, and why is it important to the events?",
+        "Describe the context and impact of {topic} in this part of the story."
+    ]
+
     sq_list = []
     for i in range(3):
         p_idx = (i + 3) % num_paras
         p_content = paragraphs[p_idx]
         topic = get_unique_section_topic(p_content, p_idx)
         
-        q_text = f"Explain the significance of {topic} as described in the chapter narrative."
+        q_text = sq_templates[i % len(sq_templates)].format(topic=topic)
         ans = extract_grounded_answer_from_text(q_text, topic, p_content, max_words=50)
         p1 = s_marks // 2
         p2 = s_marks - p1
@@ -745,19 +769,26 @@ def generate_fallback_questions(
             "expected_length": "40 - 60 words"
         })
 
-    lq_list = []
+    lq_templates = [
+        "Provide a comprehensive analysis of {topic}, explaining its key components, background, and broader outcome.",
+        "Analyze how {topic} develops through the events described, examining its overall impact on the chapter.",
+        "Discuss in detail the role of {topic}, supported by evidence and observations from the text."
+    ]
+    
     prefixes = [
         "A detailed analysis of this section shows that ",
         "Examining the key events in this part reveals ",
         "Analyzing the conclusion of the chapter demonstrates "
     ]
+    
+    lq_list = []
     for i in range(3):
-        p_idx1 = (i * 2) % num_paras
-        p_idx2 = (i * 2 + 1) % num_paras
+        p_idx1 = (i + 6) % num_paras
+        p_idx2 = (i + 7) % num_paras
         p_content = paragraphs[p_idx1] + " " + paragraphs[p_idx2]
         topic = get_unique_section_topic(p_content, p_idx1)
         
-        q_text = f"Provide a detailed analysis of {topic}, explaining its key components, actions, and broader impact."
+        q_text = lq_templates[i % len(lq_templates)].format(topic=topic)
         raw_ans = extract_grounded_answer_from_text(q_text, topic, p_content, max_words=100)
         ans = prefixes[i] + raw_ans[0].lower() + raw_ans[1:] if raw_ans else prefixes[i] + p_content[:150]
         
