@@ -926,7 +926,8 @@ def generate_chat_response(messages: List[Dict[str, str]], user_api_key: Optiona
 
         headers = {
             "Authorization": f"Bearer {groq_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "User-Agent": "TeachGenie-AI/1.0 (FastAPI Backend)"
         }
         for model_name in models:
             data = {
@@ -946,6 +947,9 @@ def generate_chat_response(messages: List[Dict[str, str]], user_api_key: Optiona
                 err_msg = f"Groq API model {model_name} HTTP {e.code}: {e.reason}"
                 logger.warning(err_msg)
                 diagnostics.append(err_msg)
+                if e.code in (401, 403):
+                    logger.warning(f"Groq API returned HTTP {e.code} (Auth/Permission error). Short-circuiting Groq retries to switch to fallback provider.")
+                    break
             except Exception as e:
                 err_msg = f"Groq API model {model_name} error: {str(e)}"
                 logger.warning(err_msg)
@@ -958,7 +962,10 @@ def generate_chat_response(messages: List[Dict[str, str]], user_api_key: Optiona
             
         for model_name in models:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_key}"
-            headers = {"Content-Type": "application/json"}
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": "TeachGenie-AI/1.0 (FastAPI Backend)"
+            }
             
             # Payload Attempt A: System Instruction
             data_sys = {
@@ -986,6 +993,9 @@ def generate_chat_response(messages: List[Dict[str, str]], user_api_key: Optiona
                 err_msg = f"Gemini REST model {model_name} HTTP {e.code}: {e.reason}"
                 logger.warning(err_msg)
                 diagnostics.append(err_msg)
+                if e.code in (401, 403):
+                    logger.warning(f"Gemini REST returned HTTP {e.code}. Short-circuiting Gemini model loop.")
+                    break
             except Exception as e:
                 err_msg = f"Gemini REST model {model_name} error: {str(e)}"
                 logger.warning(err_msg)

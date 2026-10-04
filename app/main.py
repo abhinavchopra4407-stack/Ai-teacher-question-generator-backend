@@ -56,6 +56,53 @@ def read_root():
 def health_check():
     return {"status": "healthy", "timestamp": datetime.datetime.utcnow().isoformat()}
 
+@app.get("/api/ai/diagnostics")
+@app.get("/api/health/ai")
+def ai_diagnostics():
+    """Sanitized AI provider connectivity diagnostic endpoint (no secret values returned)."""
+    groq_key = ai_engine.clean_api_key(os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY") or settings.GROQ_API_KEY)
+    gemini_key = ai_engine.clean_api_key(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or settings.GEMINI_API_KEY)
+    openai_key = ai_engine.clean_api_key(os.getenv("OPENAI_API_KEY"))
+
+    status_report = {
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "providers": {
+            "groq": {"configured": bool(groq_key), "status": "unknown", "detail": "Not tested"},
+            "gemini": {"configured": bool(gemini_key), "status": "unknown", "detail": "Not tested"},
+            "openai": {"configured": bool(openai_key), "status": "unknown", "detail": "Not tested"}
+        }
+    }
+
+    if groq_key:
+        try:
+            res = ai_engine.call_groq_api("Say 'Connected'", groq_key)
+            if res:
+                status_report["providers"]["groq"]["status"] = "ok"
+                status_report["providers"]["groq"]["detail"] = "Connected successfully"
+            else:
+                status_report["providers"]["groq"]["status"] = "error"
+                status_report["providers"]["groq"]["detail"] = "Groq call returned empty response"
+        except Exception as e:
+            status_report["providers"]["groq"]["status"] = "error"
+            status_report["providers"]["groq"]["detail"] = f"Groq error: {str(e)}"
+
+    if gemini_key:
+        try:
+            res = ai_engine.call_gemini_api_rest("Say 'Connected'", gemini_key)
+            if res:
+                status_report["providers"]["gemini"]["status"] = "ok"
+                status_report["providers"]["gemini"]["detail"] = "Connected successfully"
+            else:
+                status_report["providers"]["gemini"]["status"] = "error"
+                status_report["providers"]["gemini"]["detail"] = "Gemini call returned empty response"
+        except Exception as e:
+            status_report["providers"]["gemini"]["status"] = "error"
+            status_report["providers"]["gemini"]["detail"] = f"Gemini error: {str(e)}"
+
+    any_ok = any(p["status"] == "ok" for p in status_report["providers"].values())
+    status_report["overall_status"] = "healthy" if any_ok else ("unconfigured" if not any(p["configured"] for p in status_report["providers"].values()) else "degraded")
+    return status_report
+
 # ================= AUTHENTICATION ENDPOINTS =================
 
 @app.post("/api/auth/register", response_model=schemas.Token)

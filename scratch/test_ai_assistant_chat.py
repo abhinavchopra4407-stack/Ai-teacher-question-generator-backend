@@ -110,5 +110,17 @@ class TestAIAssistantChat(unittest.TestCase):
             self.assertEqual(res_fail.status_code, 503)
             self.assertIn("AI Assistant provider is currently unavailable", res_fail.json()["detail"])
 
+    def test_ai_diagnostics_endpoint(self):
+        res = self.client.get("/api/ai/diagnostics")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertIn("providers", data)
+        self.assertIn("groq", data["providers"])
+        self.assertIn("gemini", data["providers"])
+        # Ensure no secret keys are exposed
+        raw_json = res.text
+        self.assertNotIn("AIza", raw_json)
+        self.assertNotIn("gsk_", raw_json)
+
 if __name__ == "__main__":
     unittest.main()
