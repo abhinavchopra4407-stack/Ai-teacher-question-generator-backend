@@ -614,51 +614,63 @@ def generate_fallback_questions(
             f"Evaluate the conclusions regarding {topic_3[:30]} drawn in the text, detailing its key applications and theoretical framework."
         ]
 
+    vs_marks = marks_dist.get("very_short", 2) if marks_dist else 2
+    s_marks = marks_dist.get("short", 4) if marks_dist else 4
+    l_marks = marks_dist.get("long", 8) if marks_dist else 8
+
     vs_list = []
     for i, text in enumerate(vs_questions, 1):
-        topic_name = f"Topic {i}: {topic_1[:20]}"
+        topic_name = f"Topic {i}: Overview"
+        ans = extract_grounded_answer_from_text(text, topic_1, chapter_text, max_words=25)
         vs_list.append({
             "id": str(uuid.uuid4()),
             "question_number": i,
             "question_text": text,
             "question_type": "Very Short Answer",
             "difficulty": difficulty,
-            "marks": marks_dist.get("very_short", 2) if marks_dist else 2,
+            "marks": vs_marks,
             "related_topic": topic_name,
-            "answer": f"In '{chapter_title}', {topic_1[:30]} refers to the fundamental concept defined in the chapter text.",
-            "marking_points": ["Correct definition / identification (2 marks)"],
+            "answer": ans,
+            "marking_points": [f"Correct definition/term identification ({vs_marks} marks)"],
             "expected_length": "1 - 10 words"
         })
 
     sq_list = []
     for i, text in enumerate(s_questions, 4):
-        topic_name = f"Topic {i}: {topic_2[:20]}"
+        topic_name = f"Topic {i}: Explanation"
+        ans = extract_grounded_answer_from_text(text, topic_2, chapter_text, max_words=50)
+        p1 = s_marks // 2
+        p2 = s_marks - p1
         sq_list.append({
             "id": str(uuid.uuid4()),
             "question_number": i,
             "question_text": text,
             "question_type": "Short Answer",
             "difficulty": difficulty,
-            "marks": marks_dist.get("short", 4) if marks_dist else 4,
+            "marks": s_marks,
             "related_topic": topic_name,
-            "answer": f"{topic_2[:30]} plays a crucial role in '{chapter_title}' by providing key functional principles and theoretical structure described in the text.",
-            "marking_points": ["Primary role identification (2 marks)", "Key explanation (2 marks)"],
+            "answer": ans,
+            "marking_points": [f"Identification of primary concept ({p1} marks)", f"Explanation & context ({p2} marks)"],
             "expected_length": "40 - 60 words"
         })
 
     lq_list = []
     for i, text in enumerate(l_questions, 7):
-        topic_name = f"Topic {i}: {topic_3[:20]}"
+        topic_name = f"Topic {i}: In-depth Analysis"
+        ans = extract_grounded_answer_from_text(text, topic_3, chapter_text, max_words=100)
+        p1 = l_marks // 4
+        p2 = l_marks // 2
+        p3 = l_marks - p1 - p2
         lq_list.append({
             "id": str(uuid.uuid4()),
             "question_number": i,
             "question_text": text,
             "question_type": "Long Answer",
             "difficulty": difficulty,
-            "marks": marks_dist.get("long", 8) if marks_dist else 8,
+            "marks": l_marks,
             "related_topic": topic_name,
-            "answer": f"A comprehensive evaluation of {topic_3[:30]} in '{chapter_title}' highlights its core theoretical framework, analytical components, and practical implications as presented in the chapter.",
-            "marking_points": ["Core definition (2 marks)", "Detailed analysis (4 marks)", "Conclusion & applications (2 marks)"],
+            "answer": ans,
+            "marking_points": [f"Core definition & introduction ({p1} marks)", f"Detailed step-by-step analysis ({p2} marks)", f"Conclusion & applications ({p3} marks)"],
             "expected_length": "150 - 250 words"
         })
 

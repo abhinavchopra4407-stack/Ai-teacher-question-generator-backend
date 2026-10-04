@@ -68,13 +68,14 @@ def process_uploaded_document(file: UploadFile, file_bytes: bytes) -> Tuple[str,
         )
         
     extracted_text = clean_text(extracted_text)
-    if not extracted_text or len(extracted_text.strip()) < 20:
+    word_count = len(re.findall(r'\w+', extracted_text))
+    
+    if not extracted_text or word_count < 30:
         raise HTTPException(
             status_code=400,
-            detail="No readable text found in document. The file might be scanned, empty, image-only, or corrupted."
+            detail="No readable text could be extracted from this document. The file may be scanned, image-only, password-protected, empty, or corrupted. Please upload a digital, text-readable PDF, DOCX, or TXT file."
         )
         
-    word_count = len(re.findall(r'\w+', extracted_text))
     return extracted_text, word_count
 
 def clean_text(text: str) -> str:
