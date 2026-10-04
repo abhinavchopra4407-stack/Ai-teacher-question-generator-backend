@@ -49,6 +49,16 @@ class TextExtractResponse(BaseModel):
     file_type: Optional[str] = None
 
 # --- Question Schemas ---
+class SectionConfig(BaseModel):
+    id: Optional[str] = None
+    name: str
+    type: str  # "Very Short Answer", "Short Answer", "Long Answer", etc.
+    enabled: bool = True
+    question_count: int = 3
+    marks_per_question: int = 2
+    expected_length: Optional[str] = "1-10 words"
+    difficulty: Optional[str] = "Medium"
+
 class SingleQuestion(BaseModel):
     id: str
     question_number: int
@@ -57,6 +67,8 @@ class SingleQuestion(BaseModel):
     difficulty: str     # "Easy", "Medium", "Hard"
     marks: int
     related_topic: str
+    section_name: Optional[str] = None
+    source_pages: Optional[List[int]] = []
     answer: Optional[str] = None
     marking_points: Optional[List[str]] = []
     expected_length: Optional[str] = None
@@ -69,6 +81,7 @@ class GenerateQuestionsRequest(BaseModel):
     board: Optional[str] = "General / CBSE"
     language: str = "English"  # "English" or "Hindi"
     difficulty: str = "Medium" # "Easy", "Medium", "Hard"
+    sections: Optional[List[SectionConfig]] = None
     marks_distribution: Optional[Dict[str, int]] = {
         "very_short": 2,
         "short": 4,
@@ -85,9 +98,11 @@ class QuestionPaperResponse(BaseModel):
     language: str
     difficulty: str
     total_marks: int
+    sections: Optional[List[SectionConfig]] = None
     very_short_questions: List[SingleQuestion]
     short_questions: List[SingleQuestion]
     long_questions: List[SingleQuestion]
+    all_questions: Optional[List[SingleQuestion]] = None
 
 class RegenerateSingleRequest(BaseModel):
     chapter_title: str

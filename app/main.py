@@ -235,6 +235,8 @@ def generate_questions(
     if not chapter_text or len(chapter_text.strip()) < 20:
         raise HTTPException(status_code=400, detail="Chapter content is empty or contains insufficient text.")
 
+    sec_dicts = [s.dict() for s in req.sections] if req.sections else None
+
     generated_data = ai_engine.generate_questions_from_chapter(
         chapter_title=req.chapter_title,
         chapter_text=chapter_text,
@@ -243,6 +245,7 @@ def generate_questions(
         board=req.board or "General",
         language=req.language,
         difficulty=req.difficulty,
+        sections=sec_dicts,
         marks_dist=req.marks_distribution,
         special_instructions=req.special_instructions,
         user_api_key=current_user.custom_gemini_api_key
@@ -251,8 +254,9 @@ def generate_questions(
     vs = generated_data.get("very_short_questions", [])
     sq = generated_data.get("short_questions", [])
     lq = generated_data.get("long_questions", [])
+    all_q = generated_data.get("all_questions", vs + sq + lq)
     
-    total_marks = sum(q["marks"] for q in vs + sq + lq)
+    total_marks = sum(q["marks"] for q in all_q)
     
     return {
         "chapter_title": req.chapter_title,
@@ -262,9 +266,11 @@ def generate_questions(
         "language": req.language,
         "difficulty": req.difficulty,
         "total_marks": total_marks,
+        "sections": req.sections,
         "very_short_questions": vs,
         "short_questions": sq,
-        "long_questions": lq
+        "long_questions": lq,
+        "all_questions": all_q
     }
 
 @app.post("/api/questions/regenerate-single", response_model=schemas.SingleQuestion)

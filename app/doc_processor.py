@@ -55,7 +55,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
                 cleaned_page_lines.append(line)
             
             if cleaned_page_lines:
-                cleaned_pages.append("\n".join(cleaned_page_lines))
+                cleaned_pages.append(f"[Page {p_idx + 1}]\n" + "\n".join(cleaned_page_lines))
 
         full_text = "\n\n".join(cleaned_pages)
         full_text = clean_text(full_text)
