@@ -32,7 +32,7 @@ allowed_origins = [
 
 frontend_env = os.getenv("FRONTEND_URL")
 if frontend_env:
-    allowed_origins.append(frontend_env.strip().replace(/\/+$/, ''))
+    allowed_origins.append(frontend_env.strip().rstrip('/'))
 
 # Configure CORS Middleware
 app.add_middleware(
