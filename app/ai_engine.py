@@ -52,6 +52,43 @@ def call_groq_api(prompt: str, user_api_key: Optional[str] = None) -> Optional[s
 
     return None
 
+def call_gemini_api_rest(prompt: str, user_api_key: Optional[str] = None) -> Optional[str]:
+    """Call Google Gemini REST API (gemini-2.5-flash / gemini-1.5-flash) with JSON response format."""
+    api_key = user_api_key or os.getenv("GEMINI_API_KEY") or settings.GEMINI_API_KEY
+    if not api_key:
+        return None
+
+    models_to_try = ["gemini-2.5-flash", "gemini-1.5-flash"]
+    for model_name in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        headers = {"Content-Type": "application/json"}
+        data = {
+            "contents": [
+                {"parts": [{"text": prompt}]}
+            ],
+            "generationConfig": {
+                "response_mime_type": "application/json",
+                "temperature": 0.2
+            }
+        }
+        try:
+            req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers)
+            with urllib.request.urlopen(req, timeout=35) as response:
+                res_body = json.loads(response.read().decode("utf-8"))
+                candidates = res_body.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts and "text" in parts[0]:
+                        text = parts[0]["text"]
+                        if text and text.strip():
+                            logger.info(f"Gemini REST API success with {model_name} (response length: {len(text)} chars)")
+                            return text
+        except Exception as e:
+            logger.warning(f"Gemini REST API model {model_name} error: {e}")
+            continue
+
+    return None
+
 def get_gemini_client(user_api_key: Optional[str] = None):
     """Obtain initialized Google GenAI client or key."""
     api_key = user_api_key or os.getenv("GEMINI_API_KEY") or settings.GEMINI_API_KEY
@@ -390,11 +427,22 @@ REQUIRED JSON OUTPUT FORMAT:
             except Exception as e:
                 logger.warning(f"Failed to parse Groq response JSON on attempt {attempt + 1}: {e}")
 
-    # 2. Try Gemini API Provider second
+    # 2. Try Gemini REST API Provider second
+    gemini_res = call_gemini_api_rest(prompt, user_api_key)
+    if gemini_res:
+        try:
+            data = extract_json_from_text(gemini_res)
+            if validate_and_clean_questions_output(data, chapter_title, chapter_text):
+                logger.info("Successfully validated Gemini REST AI question response!")
+                return data
+        except Exception as e:
+            logger.warning(f"Failed to parse Gemini REST response JSON: {e}")
+
+    # 3. Try Gemini SDK Client Provider third
     client = get_gemini_client(user_api_key)
     if client:
         try:
-            logger.info("Calling Gemini API Provider...")
+            logger.info("Calling Gemini API Provider SDK...")
             raw_response = ""
             if hasattr(client, "models"):
                 response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
@@ -409,7 +457,7 @@ REQUIRED JSON OUTPUT FORMAT:
                 logger.info("Successfully validated Gemini AI question response!")
                 return data
         except Exception as e:
-            logger.error(f"Error calling Gemini API: {e}")
+            logger.error(f"Error calling Gemini API SDK: {e}")
 
     # 3. Smart Semantic Fallback Question Generator
     logger.info("Executing Smart Semantic Fallback Question Generator...")
@@ -695,17 +743,36 @@ def generate_fallback_questions(
     num_paras = len(paragraphs)
 
     def get_unique_section_topic(p_text: str, p_idx: int) -> str:
-        stop_words = {"lighthouse", "moonbay", "chapter", "section", "story", "the", "this", "that", "where", "which", "would", "could", "should", "about", "testing", "stands", "found", "with", "from", "they", "there", "page", "story", "when", "into", "through", "tucked", "edge", "stood", "tucked", "small", "carried", "inserted"}
+        p_clean = p_text.replace('\r', '').strip()
+        # 1. Check if section starts with a clean section title/heading line
+        lines = [l.strip() for l in p_clean.splitlines() if l.strip()]
+        if lines:
+            first_line = re.sub(r'^\d+[\.\:]\s*', '', lines[0]).strip()
+            first_line = re.sub(r'\b\d+\b', '', first_line).strip()
+            if 2 <= len(first_line.split()) <= 7 and not first_line.endswith('.') and not first_line.lower().startswith(("part", "chapter", "section", "page")):
+                return first_line.title()
+                
+        # 2. Extract multi-word proper noun phrases (e.g. "Moonbay Harbor", "Keeper's Journal")
+        prop_nouns = re.findall(r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b', p_clean.replace('\n', ' '))
+        skip = {"The Garden", "The Clockmaker", "The Lighthouse", "Very Short", "Short Answer", "Long Answer", "Moonbay"}
+        valid_props = [p for p in prop_nouns if p not in skip]
+        if valid_props:
+            return valid_props[0].title()
+
+        # 3. Clean keywords
+        stop_words = {"chapter", "section", "story", "the", "this", "that", "where", "which", "would", "could", "should", "about", "testing", "stands", "found", "with", "from", "they", "there", "page", "when", "into", "through", "small", "carried", "inserted", "stated", "regarding", "significance", "described", "text", "narrative", "weeks", "followed", "people", "hill", "climbing", "midday", "last", "town", "listen", "choice", "stay", "light", "tomorrow", "northern", "edge", "seventy", "years", "guided", "modern", "satellite"}
         words = re.findall(r'\b[A-Z][a-z]{3,}\b|\b[a-z]{4,}\b', p_text)
-        unique_words = []
+        key_words = []
         for w in words:
-            if w.lower() not in stop_words and w.lower() not in [u.lower() for u in unique_words]:
-                unique_words.append(w)
-            if len(unique_words) == 3:
+            if w.lower() not in stop_words and w.lower() not in [k.lower() for k in key_words]:
+                key_words.append(w.capitalize())
+            if len(key_words) == 2:
                 break
-        if unique_words:
-            return " ".join(unique_words).title()
-        return f"Key Event {p_idx + 1}"
+        if len(key_words) == 2:
+            return f"{key_words[0]} & {key_words[1]} Overview"
+        elif len(key_words) == 1:
+            return f"{key_words[0]} Context"
+        return f"Narrative Event {p_idx + 1}"
 
     vs_marks = marks_dist.get("very_short", 2) if marks_dist else 2
     s_marks = marks_dist.get("short", 4) if marks_dist else 4
@@ -748,11 +815,11 @@ def generate_fallback_questions(
     sq_list = []
     for i in range(3):
         p_idx = (i + 3) % num_paras
-        p_content = paragraphs[p_idx]
+        p_content = paragraphs[p_idx] + " " + paragraphs[(p_idx + 1) % num_paras]
         topic = get_unique_section_topic(p_content, p_idx)
         
         q_text = sq_templates[i % len(sq_templates)].format(topic=topic)
-        ans = extract_grounded_answer_from_text(q_text, topic, p_content, max_words=50)
+        ans = extract_grounded_answer_from_text(q_text, topic, p_content, max_words=60)
         p1 = s_marks // 2
         p2 = s_marks - p1
         
@@ -785,12 +852,13 @@ def generate_fallback_questions(
     for i in range(3):
         p_idx1 = (i + 6) % num_paras
         p_idx2 = (i + 7) % num_paras
-        p_content = paragraphs[p_idx1] + " " + paragraphs[p_idx2]
+        p_idx3 = (i + 8) % num_paras
+        p_content = paragraphs[p_idx1] + " " + paragraphs[p_idx2] + " " + paragraphs[p_idx3]
         topic = get_unique_section_topic(p_content, p_idx1)
         
         q_text = lq_templates[i % len(lq_templates)].format(topic=topic)
-        raw_ans = extract_grounded_answer_from_text(q_text, topic, p_content, max_words=100)
-        ans = prefixes[i] + raw_ans[0].lower() + raw_ans[1:] if raw_ans else prefixes[i] + p_content[:150]
+        raw_ans = extract_grounded_answer_from_text(q_text, topic, p_content, max_words=180)
+        ans = prefixes[i] + raw_ans[0].lower() + raw_ans[1:] if raw_ans else prefixes[i] + p_content[:250]
         
         p1 = l_marks // 4
         p2 = l_marks // 2
