@@ -663,3 +663,137 @@ def get_dashboard_stats(
         "total_chapters": total_chapters,
         "recent_papers": recent_out
     }
+
+# ================= AI ASSISTANT CHAT ENDPOINTS =================
+
+@app.get("/api/chat/conversations", response_model=List[schemas.ConversationOut])
+def get_user_conversations(
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db)
+):
+    convs = db.query(models.Conversation).filter(
+        models.Conversation.user_id == current_user.id
+    ).order_by(models.Conversation.updated_at.desc()).all()
+    return convs
+
+@app.get("/api/chat/conversations/{conversation_id}", response_model=schemas.ConversationOut)
+def get_conversation_by_id(
+    conversation_id: str,
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db)
+):
+    conv = db.query(models.Conversation).filter(
+        models.Conversation.id == conversation_id,
+        models.Conversation.user_id == current_user.id
+    ).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found or access denied.")
+    return conv
+
+@app.post("/api/chat/send", response_model=schemas.ConversationOut)
+@app.post("/api/chat", response_model=schemas.ConversationOut)
+def send_chat_message(
+    req: schemas.SendChatMessageRequest,
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db)
+):
+    user_msg_text = req.message.strip()
+    if not user_msg_text:
+        raise HTTPException(status_code=400, detail="Message content cannot be empty.")
+        
+    conversation = None
+    if req.conversation_id:
+        conversation = db.query(models.Conversation).filter(
+            models.Conversation.id == req.conversation_id,
+            models.Conversation.user_id == current_user.id
+        ).first()
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found or access denied.")
+    
+    if not conversation:
+        title_summary = user_msg_text[:40].strip()
+        if len(user_msg_text) > 40:
+            title_summary += "..."
+        conversation = models.Conversation(
+            user_id=current_user.id,
+            title=title_summary or "New Conversation"
+        )
+        db.add(conversation)
+        db.commit()
+        db.refresh(conversation)
+
+    # Save User message
+    user_msg = models.Message(
+        conversation_id=conversation.id,
+        role="user",
+        content=user_msg_text
+    )
+    db.add(user_msg)
+    db.commit()
+    db.refresh(conversation)
+
+    # Load recent conversation context
+    history_msgs = db.query(models.Message).filter(
+        models.Message.conversation_id == conversation.id
+    ).order_by(models.Message.created_at.asc()).all()
+
+    context_array = [{"role": m.role, "content": m.content} for m in history_msgs]
+
+    # Generate AI response
+    try:
+        ai_response_text = ai_engine.generate_chat_response(
+            messages=context_array,
+            user_api_key=current_user.custom_gemini_api_key
+        )
+    except Exception as e:
+        ai_response_text = f"I encountered an error processing your request. Please try again. (Details: {str(e)})"
+
+    # Save AI message
+    ai_msg = models.Message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content=ai_response_text
+    )
+    db.add(ai_msg)
+    conversation.updated_at = datetime.datetime.utcnow()
+    db.commit()
+    db.refresh(conversation)
+
+    return conversation
+
+@app.put("/api/chat/conversations/{conversation_id}", response_model=schemas.ConversationOut)
+def update_conversation(
+    conversation_id: str,
+    req: schemas.UpdateConversationRequest,
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db)
+):
+    conv = db.query(models.Conversation).filter(
+        models.Conversation.id == conversation_id,
+        models.Conversation.user_id == current_user.id
+    ).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found or access denied.")
+        
+    conv.title = req.title.strip()
+    conv.updated_at = datetime.datetime.utcnow()
+    db.commit()
+    db.refresh(conv)
+    return conv
+
+@app.delete("/api/chat/conversations/{conversation_id}")
+def delete_conversation(
+    conversation_id: str,
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db)
+):
+    conv = db.query(models.Conversation).filter(
+        models.Conversation.id == conversation_id,
+        models.Conversation.user_id == current_user.id
+    ).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found or access denied.")
+        
+    db.delete(conv)
+    db.commit()
+    return {"message": "Conversation deleted successfully."}

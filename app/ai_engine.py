@@ -840,3 +840,114 @@ def generate_fallback_questions(
         "all_questions": all_questions,
         "sections": active_sections
     }
+
+SYSTEM_CHAT_PROMPT = (
+    "You are TeachGenie.AI Assistant, an expert AI co-pilot designed specifically for teachers, educators, and curriculum authors. "
+    "You provide clear, step-by-step concept explanations, lesson plans, worksheet questions, activities, and answer questions across "
+    "all subjects including Science, Mathematics, History, Geography, English, Programming, and General Knowledge. "
+    "Format your answers with clean Markdown structure (use headings, bullet points, tables, bold text, and code blocks where applicable). "
+    "Generate comprehensive, practical answers in the user's requested language (English, Hindi, etc.)."
+)
+
+def generate_chat_response(messages: List[Dict[str, str]], user_api_key: Optional[str] = None) -> str:
+    """
+    Generate an AI response for multi-turn teacher chat conversations using Groq, Gemini, or configured provider.
+    """
+    groq_messages = [{"role": m["role"], "content": m["content"]} for m in messages if m.get("content")]
+    if not any(m["role"] == "system" for m in groq_messages):
+        groq_messages.insert(0, {"role": "system", "content": SYSTEM_CHAT_PROMPT})
+        
+    api_key = user_api_key or os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY") or settings.GROQ_API_KEY
+    if api_key:
+        if api_key.startswith("xai-"):
+            url = "https://api.x.ai/v1/chat/completions"
+            models = ["grok-2-latest", "grok-beta"]
+        else:
+            url = "https://api.groq.com/openai/v1/chat/completions"
+            models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        for model_name in models:
+            data = {
+                "model": model_name,
+                "messages": groq_messages,
+                "temperature": 0.5
+            }
+            try:
+                req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers)
+                with urllib.request.urlopen(req, timeout=35) as response:
+                    res_body = json.loads(response.read().decode("utf-8"))
+                    content = res_body["choices"][0]["message"]["content"]
+                    if content and content.strip():
+                        return content.strip()
+            except Exception as e:
+                logger.warning(f"Chat Groq/xAI API model {model_name} error: {e}")
+                continue
+
+    # 2. Try Gemini REST API
+    gemini_key = user_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or settings.GEMINI_API_KEY
+    if gemini_key:
+        models = ["gemini-2.0-flash", "gemini-1.5-flash"]
+        contents = []
+        for m in messages:
+            role = "user" if m.get("role") == "user" else "model"
+            contents.append({"role": role, "parts": [{"text": m.get("content", "")}]})
+            
+        for model_name in models:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_key}"
+            headers = {"Content-Type": "application/json"}
+            data = {
+                "system_instruction": {
+                    "parts": [{"text": SYSTEM_CHAT_PROMPT}]
+                },
+                "contents": contents,
+                "generationConfig": {
+                    "temperature": 0.5
+                }
+            }
+            try:
+                req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers)
+                with urllib.request.urlopen(req, timeout=35) as response:
+                    res_body = json.loads(response.read().decode("utf-8"))
+                    candidates = res_body.get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        if parts and "text" in parts[0]:
+                            text = parts[0]["text"]
+                            if text and text.strip():
+                                return text.strip()
+            except Exception as e:
+                logger.warning(f"Chat Gemini REST model {model_name} error: {e}")
+                continue
+
+    # 3. Gemini SDK fallback
+    client = get_gemini_client(user_api_key)
+    if client:
+        try:
+            last_msg = messages[-1]["content"] if messages else "Hello"
+            if hasattr(client, "models"):
+                res = client.models.generate_content(model='gemini-2.0-flash', contents=last_msg)
+                return res.text.strip()
+            elif hasattr(client, "GenerativeModel"):
+                res = client.GenerativeModel("gemini-1.5-flash").generate_content(last_msg)
+                return res.text.strip()
+        except Exception as e:
+            logger.error(f"Chat Gemini SDK error: {e}")
+
+    last_user_msg = messages[-1]["content"] if messages else "this topic"
+    return (
+        f"### Teaching Guide: {last_user_msg}\n\n"
+        f"Here is a structured explanation designed for your classroom:\n\n"
+        f"#### 1. Core Explanation\n"
+        f"- **Concept Overview**: Explain {last_user_msg} using real-world analogies.\n"
+        f"- **Key Terms**: Define essential vocabulary clearly.\n\n"
+        f"#### 2. Step-by-Step Breakdown\n"
+        f"1. **Introduction**: Hook student interest with a relatable question.\n"
+        f"2. **Demonstration**: Present key examples and diagrams.\n"
+        f"3. **Application**: Engage students in active problem-solving.\n\n"
+        f"#### 3. Quick Assessment Question\n"
+        f"*Question*: How would you explain the significance of {last_user_msg} in everyday life?"
+    )
