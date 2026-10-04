@@ -746,7 +746,12 @@ def send_chat_message(
             user_api_key=current_user.custom_gemini_api_key
         )
     except Exception as e:
-        ai_response_text = f"I encountered an error processing your request. Please try again. (Details: {str(e)})"
+        db.delete(user_msg)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e)
+        )
 
     # Save AI message
     ai_msg = models.Message(

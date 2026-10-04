@@ -842,39 +842,60 @@ def generate_fallback_questions(
     }
 
 SYSTEM_CHAT_PROMPT = (
-    "You are TeachGenie.AI Assistant, an expert AI co-pilot designed specifically for teachers, educators, and curriculum authors. "
-    "You provide clear, step-by-step concept explanations, lesson plans, worksheet questions, activities, and answer questions across "
-    "all subjects including Science, Mathematics, History, Geography, English, Programming, and General Knowledge. "
-    "Format your answers with clean Markdown structure (use headings, bullet points, tables, bold text, and code blocks where applicable). "
-    "Generate comprehensive, practical answers in the user's requested language (English, Hindi, etc.)."
+    "You are TeachGenie.AI Assistant, an intelligent, helpful AI assistant for teachers, students, and educators.\n"
+    "- Answer the user's actual question directly, accurately, concisely, and naturally according to their intent.\n"
+    "- For direct factual questions (e.g., 'When did India become independent?', 'What is 25 x 16?'), provide a direct, accurate answer first (e.g., 'India became independent on 15 August 1947.', '25 × 16 = 400.').\n"
+    "- Do NOT wrap every response in a generic 'Teaching Guide' or lesson plan format unless the user explicitly requests a lesson plan or teaching guide.\n"
+    "- If the user asks for a specific number of questions (e.g., 'Generate 20 questions on photosynthesis'), generate EXACTLY the requested quantity of questions.\n"
+    "- Use previous conversation history context when answering follow-up questions (e.g., 'What was my previous question?').\n"
+    "- For concept explanations, lesson plans, or problem solving, provide clear, step-by-step responses using clean Markdown formatting (headings, lists, code blocks, tables).\n"
+    "- Answer in the user's requested language (English, Hindi, Hinglish, etc.)."
 )
+
+def format_gemini_contents(messages: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    """Format chat messages to satisfy Gemini API requirement of alternating user/model roles."""
+    contents = []
+    for m in messages:
+        role = "user" if m.get("role") == "user" else "model"
+        content = m.get("content", "").strip()
+        if not content:
+            continue
+        if contents and contents[-1]["role"] == role:
+            contents[-1]["parts"][0]["text"] += f"\n\n{content}"
+        else:
+            contents.append({"role": role, "parts": [{"text": content}]})
+    return contents
 
 def generate_chat_response(messages: List[Dict[str, str]], user_api_key: Optional[str] = None) -> str:
     """
-    Generate an AI response for multi-turn teacher chat conversations using Groq, Gemini, or configured provider.
+    Generate a real LLM AI response for multi-turn chat conversations using Groq, Gemini, or OpenAI.
     """
-    groq_messages = [{"role": m["role"], "content": m["content"]} for m in messages if m.get("content")]
-    if not any(m["role"] == "system" for m in groq_messages):
-        groq_messages.insert(0, {"role": "system", "content": SYSTEM_CHAT_PROMPT})
-        
-    api_key = user_api_key or os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY") or settings.GROQ_API_KEY
-    if api_key:
-        if api_key.startswith("xai-"):
+    if not messages:
+        raise ValueError("No message history provided for chat generation.")
+
+    # 1. Try Groq / xAI API Provider
+    groq_key = user_api_key or os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY") or settings.GROQ_API_KEY
+    if groq_key:
+        if groq_key.startswith("xai-"):
             url = "https://api.x.ai/v1/chat/completions"
             models = ["grok-2-latest", "grok-beta"]
         else:
             url = "https://api.groq.com/openai/v1/chat/completions"
             models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
 
+        groq_messages = [{"role": m["role"], "content": m["content"]} for m in messages if m.get("content")]
+        if not any(m["role"] == "system" for m in groq_messages):
+            groq_messages.insert(0, {"role": "system", "content": SYSTEM_CHAT_PROMPT})
+
         headers = {
-            "Authorization": f"Bearer {api_key}",
+            "Authorization": f"Bearer {groq_key}",
             "Content-Type": "application/json"
         }
         for model_name in models:
             data = {
                 "model": model_name,
                 "messages": groq_messages,
-                "temperature": 0.5
+                "temperature": 0.3
             }
             try:
                 req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers)
@@ -882,19 +903,17 @@ def generate_chat_response(messages: List[Dict[str, str]], user_api_key: Optiona
                     res_body = json.loads(response.read().decode("utf-8"))
                     content = res_body["choices"][0]["message"]["content"]
                     if content and content.strip():
+                        logger.info(f"Chat response generated successfully via Groq/xAI model: {model_name}")
                         return content.strip()
             except Exception as e:
-                logger.warning(f"Chat Groq/xAI API model {model_name} error: {e}")
+                logger.warning(f"Chat Groq/xAI model {model_name} error: {e}")
                 continue
 
-    # 2. Try Gemini REST API
+    # 2. Try Gemini REST API Provider
     gemini_key = user_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or settings.GEMINI_API_KEY
     if gemini_key:
-        models = ["gemini-2.0-flash", "gemini-1.5-flash"]
-        contents = []
-        for m in messages:
-            role = "user" if m.get("role") == "user" else "model"
-            contents.append({"role": role, "parts": [{"text": m.get("content", "")}]})
+        models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+        contents = format_gemini_contents(messages)
             
         for model_name in models:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_key}"
@@ -905,7 +924,7 @@ def generate_chat_response(messages: List[Dict[str, str]], user_api_key: Optiona
                 },
                 "contents": contents,
                 "generationConfig": {
-                    "temperature": 0.5
+                    "temperature": 0.3
                 }
             }
             try:
@@ -918,36 +937,30 @@ def generate_chat_response(messages: List[Dict[str, str]], user_api_key: Optiona
                         if parts and "text" in parts[0]:
                             text = parts[0]["text"]
                             if text and text.strip():
+                                logger.info(f"Chat response generated successfully via Gemini REST model: {model_name}")
                                 return text.strip()
             except Exception as e:
                 logger.warning(f"Chat Gemini REST model {model_name} error: {e}")
                 continue
 
-    # 3. Gemini SDK fallback
+    # 3. Try Gemini SDK Client Provider
     client = get_gemini_client(user_api_key)
     if client:
         try:
-            last_msg = messages[-1]["content"] if messages else "Hello"
+            last_msg = messages[-1]["content"] if messages else ""
             if hasattr(client, "models"):
                 res = client.models.generate_content(model='gemini-2.0-flash', contents=last_msg)
-                return res.text.strip()
+                if res and res.text and res.text.strip():
+                    return res.text.strip()
             elif hasattr(client, "GenerativeModel"):
                 res = client.GenerativeModel("gemini-1.5-flash").generate_content(last_msg)
-                return res.text.strip()
+                if res and res.text and res.text.strip():
+                    return res.text.strip()
         except Exception as e:
             logger.error(f"Chat Gemini SDK error: {e}")
 
-    last_user_msg = messages[-1]["content"] if messages else "this topic"
-    return (
-        f"### Teaching Guide: {last_user_msg}\n\n"
-        f"Here is a structured explanation designed for your classroom:\n\n"
-        f"#### 1. Core Explanation\n"
-        f"- **Concept Overview**: Explain {last_user_msg} using real-world analogies.\n"
-        f"- **Key Terms**: Define essential vocabulary clearly.\n\n"
-        f"#### 2. Step-by-Step Breakdown\n"
-        f"1. **Introduction**: Hook student interest with a relatable question.\n"
-        f"2. **Demonstration**: Present key examples and diagrams.\n"
-        f"3. **Application**: Engage students in active problem-solving.\n\n"
-        f"#### 3. Quick Assessment Question\n"
-        f"*Question*: How would you explain the significance of {last_user_msg} in everyday life?"
+    # No fake hardcoded fallback. Raise clear error so frontend displays helpful error message.
+    raise ValueError(
+        "AI Assistant provider is currently unavailable. "
+        "Please ensure a valid GEMINI_API_KEY or GROQ_API_KEY is configured in server environment variables or account settings."
     )
