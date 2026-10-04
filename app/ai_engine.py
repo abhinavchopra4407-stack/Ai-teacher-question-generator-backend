@@ -24,7 +24,14 @@ def call_groq_api(prompt: str, user_api_key: Optional[str] = None) -> Optional[s
         models_to_try = ["grok-2-latest", "grok-beta", "grok-2-1212"]
     else:
         url = "https://api.groq.com/openai/v1/chat/completions"
-        models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama3-70b-8192"]
+        models_to_try = [
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "llama3-70b-8192",
+            "mixtral-8x7b-32768"
+        ]
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -918,7 +925,14 @@ def generate_chat_response(messages: List[Dict[str, str]], user_api_key: Optiona
             models = ["grok-2-latest", "grok-beta"]
         else:
             url = "https://api.groq.com/openai/v1/chat/completions"
-            models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama3-70b-8192", "mixtral-8x7b-32768"]
+            models = [
+                "openai/gpt-oss-120b",
+                "openai/gpt-oss-20b",
+                "llama-3.3-70b-versatile",
+                "llama-3.1-8b-instant",
+                "llama3-70b-8192",
+                "mixtral-8x7b-32768"
+            ]
 
         groq_messages = [{"role": m["role"], "content": m["content"]} for m in messages if m.get("content")]
         if not any(m["role"] == "system" for m in groq_messages):
