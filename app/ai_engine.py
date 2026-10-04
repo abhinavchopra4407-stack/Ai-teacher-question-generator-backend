@@ -12,31 +12,36 @@ from app.doc_processor import chunk_text_if_needed, clean_text
 logger = logging.getLogger("ai_engine")
 
 def call_groq_api(prompt: str, user_api_key: Optional[str] = None) -> Optional[str]:
-    """Call Groq API using high-speed llama-3.3-70b-versatile model with JSON format output."""
-    groq_key = user_api_key or os.getenv("GROQ_API_KEY") or settings.GROQ_API_KEY
-    if not groq_key or not groq_key.startswith("gsk_"):
-        logger.info("Groq API key not configured or invalid GSK key.")
+    """Call Groq API or xAI Grok API using configured credentials."""
+    api_key = user_api_key or os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY") or settings.GROQ_API_KEY
+    if not api_key:
+        logger.info("No Groq / Grok / xAI API key configured.")
         return None
 
-    url = "https://api.groq.com/openai/v1/chat/completions"
+    if api_key.startswith("xai-"):
+        url = "https://api.x.ai/v1/chat/completions"
+        models_to_try = ["grok-2-latest", "grok-beta", "grok-2-1212"]
+    else:
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+
     headers = {
-        "Authorization": f"Bearer {groq_key}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
-    
-    models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
-    
+
     for model_name in models_to_try:
-        logger.info(f"Attempting Groq API call with model: {model_name}")
-        data = {
+        logger.info(f"Attempting AI API call to {url} with model: {model_name}")
+        data: Dict[str, Any] = {
             "model": model_name,
             "messages": [
                 {"role": "system", "content": "You are an expert educational assessment designer. Return ONLY valid JSON output."},
                 {"role": "user", "content": prompt}
             ],
-            "response_format": {"type": "json_object"},
             "temperature": 0.2
         }
+        if not api_key.startswith("xai-"):
+            data["response_format"] = {"type": "json_object"}
 
         try:
             req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers)
@@ -44,21 +49,21 @@ def call_groq_api(prompt: str, user_api_key: Optional[str] = None) -> Optional[s
                 res_body = json.loads(response.read().decode("utf-8"))
                 content = res_body["choices"][0]["message"]["content"]
                 if content and content.strip():
-                    logger.info(f"Groq API success with {model_name} (response length: {len(content)} chars)")
+                    logger.info(f"AI API success with {model_name} (response length: {len(content)} chars)")
                     return content
         except Exception as e:
-            logger.warning(f"Groq API model {model_name} error: {e}")
+            logger.warning(f"AI API model {model_name} error: {e}")
             continue
 
     return None
 
 def call_gemini_api_rest(prompt: str, user_api_key: Optional[str] = None) -> Optional[str]:
-    """Call Google Gemini REST API (gemini-2.5-flash / gemini-1.5-flash) with JSON response format."""
-    api_key = user_api_key or os.getenv("GEMINI_API_KEY") or settings.GEMINI_API_KEY
+    """Call Google Gemini REST API with JSON response format."""
+    api_key = user_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or settings.GEMINI_API_KEY
     if not api_key:
         return None
 
-    models_to_try = ["gemini-2.5-flash", "gemini-1.5-flash"]
+    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
     for model_name in models_to_try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         headers = {"Content-Type": "application/json"}
@@ -91,7 +96,7 @@ def call_gemini_api_rest(prompt: str, user_api_key: Optional[str] = None) -> Opt
 
 def get_gemini_client(user_api_key: Optional[str] = None):
     """Obtain initialized Google GenAI client or key."""
-    api_key = user_api_key or os.getenv("GEMINI_API_KEY") or settings.GEMINI_API_KEY
+    api_key = user_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or settings.GEMINI_API_KEY
     if not api_key:
         return None
         
@@ -247,7 +252,8 @@ def generate_questions_from_chapter(
     board: str = "General",
     language: str = "English",
     difficulty: str = "Medium",
-    marks_dist: Dict[str, int] = None,
+    sections: Optional[List[Dict[str, Any]]] = None,
+    marks_dist: Optional[Dict[str, int]] = None,
     special_instructions: str = "",
     user_api_key: Optional[str] = None
 ) -> Dict[str, List[Dict[str, Any]]]:

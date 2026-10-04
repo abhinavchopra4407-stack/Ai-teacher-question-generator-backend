@@ -47,6 +47,7 @@ class TextExtractResponse(BaseModel):
     word_count: int
     file_name: Optional[str] = None
     file_type: Optional[str] = None
+    document_id: Optional[str] = None
 
 # --- Question Schemas ---
 class SectionConfig(BaseModel):

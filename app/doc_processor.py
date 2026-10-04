@@ -59,8 +59,15 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 
         full_text = "\n\n".join(cleaned_pages)
         full_text = clean_text(full_text)
+        if not full_text or len(full_text.strip()) < 10:
+            raise HTTPException(
+                status_code=400,
+                detail="The uploaded PDF contains no extractable text layer. If this is a scanned document, please use OCR or upload a text-readable PDF."
+            )
         logger.info(f"Extracted PDF text: {num_pages} pages, {len(full_text)} chars")
         return full_text
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"PDF Extraction failure: {e}")
         raise HTTPException(
