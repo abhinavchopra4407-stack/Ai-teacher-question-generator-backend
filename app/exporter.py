@@ -89,23 +89,21 @@ def generate_docx_paper(
         
     doc.add_paragraph("―" * 45).alignment = WD_ALIGN_PARAGRAPH.CENTER
     
-    # Group questions by section
-    vs_q = [q for q in questions if "Very Short" in q.get("question_type", "")]
-    s_q = [q for q in questions if "Short" in q.get("question_type", "") and "Very" not in q.get("question_type", "")]
-    l_q = [q for q in questions if "Long" in q.get("question_type", "")]
-    
-    sections_list = [
-        ("SECTION A: VERY SHORT ANSWER QUESTIONS", vs_q),
-        ("SECTION B: SHORT ANSWER QUESTIONS", s_q),
-        ("SECTION C: LONG ANSWER QUESTIONS", l_q)
-    ]
+    # Dynamic section grouping for DOCX
+    section_groups = {}
+    for q in questions:
+        sec_name = q.get("section_name") or q.get("question_type") or "General Questions"
+        if sec_name not in section_groups:
+            section_groups[sec_name] = []
+        section_groups[sec_name].append(q)
     
     q_counter = 1
-    for sec_title, q_group in sections_list:
+    for sec_name, q_group in section_groups.items():
         if not q_group:
             continue
+        subtotal = sum(q.get("marks", 1) for q in q_group)
         sec_p = doc.add_paragraph()
-        sec_run = sec_p.add_run(f"\n{sec_title} ({len(q_group)} x {q_group[0].get('marks', 2)} = {len(q_group)*q_group[0].get('marks', 2)} Marks)")
+        sec_run = sec_p.add_run(f"\n{sec_name.upper()} ({len(q_group)} Questions — {subtotal} Marks)")
         sec_run.font.bold = True
         sec_run.font.size = Pt(11)
         sec_run.font.color.rgb = RGBColor(30, 58, 138)
@@ -270,21 +268,20 @@ def generate_pdf_paper(
         
     story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#CBD5E1'), spaceAfter=10))
     
-    vs_q = [q for q in questions if "Very Short" in q.get("question_type", "")]
-    s_q = [q for q in questions if "Short" in q.get("question_type", "") and "Very" not in q.get("question_type", "")]
-    l_q = [q for q in questions if "Long" in q.get("question_type", "")]
-    
-    sections_list = [
-        ("SECTION A: VERY SHORT ANSWER QUESTIONS", vs_q),
-        ("SECTION B: SHORT ANSWER QUESTIONS", s_q),
-        ("SECTION C: LONG ANSWER QUESTIONS", l_q)
-    ]
+    # Dynamic section grouping for PDF
+    pdf_section_groups = {}
+    for q in questions:
+        sec_name = q.get("section_name") or q.get("question_type") or "General Questions"
+        if sec_name not in pdf_section_groups:
+            pdf_section_groups[sec_name] = []
+        pdf_section_groups[sec_name].append(q)
     
     q_counter = 1
-    for sec_title, q_group in sections_list:
+    for sec_name, q_group in pdf_section_groups.items():
         if not q_group:
             continue
-        story.append(Paragraph(f"{sec_title} ({len(q_group)} x {q_group[0].get('marks', 2)} = {len(q_group)*q_group[0].get('marks', 2)} Marks)", sec_style))
+        subtotal = sum(q.get("marks", 1) for q in q_group)
+        story.append(Paragraph(f"{sec_name.upper()} ({len(q_group)} Questions — {subtotal} Marks)", sec_style))
         for q in q_group:
             q_text = f"<b>Q{q_counter}.</b> {q.get('question_text')} &nbsp;&nbsp;<b>[{q.get('marks')} Marks]</b>"
             story.append(Paragraph(q_text, q_style))

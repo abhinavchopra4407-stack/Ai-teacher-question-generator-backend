@@ -183,66 +183,163 @@ def extract_grounded_answer_from_text(question_text: str, topic: str, chapter_te
         return " ".join(words_list[:max_words]) + "..."
     return answer_text
 
-def validate_and_clean_questions_output(data: Dict[str, Any], chapter_title: str, chapter_text: str) -> bool:
-    """Validate AI output for exact count, non-duplication, distinct model answers, and valid schemas."""
-    if not isinstance(data, dict):
-        return False
-        
-    vs = data.get("very_short_questions", [])
-    sq = data.get("short_questions", [])
-    lq = data.get("long_questions", [])
+def normalize_sections_config(sections: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Normalize and filter enabled sections from input config."""
+    active = []
+    if sections:
+        for idx, sec in enumerate(sections):
+            if isinstance(sec, dict) and sec.get("enabled", True):
+                sec_id = sec.get("id") or f"sec-{idx + 1}"
+                name = sec.get("name") or f"Section {chr(65 + idx)}"
+                q_type = sec.get("type") or name
+                count = max(1, int(sec.get("question_count", 3)))
+                marks = max(1, int(sec.get("marks_per_question", 2)))
+                length = sec.get("expected_length") or ("1-10 words" if "Very Short" in q_type else ("40-60 words" if "Short" in q_type else "150-250 words"))
+                diff = sec.get("difficulty") or "Medium"
+                
+                active.append({
+                    "id": sec_id,
+                    "name": name,
+                    "type": q_type,
+                    "enabled": True,
+                    "question_count": count,
+                    "marks_per_question": marks,
+                    "expected_length": length,
+                    "difficulty": diff
+                })
     
-    if not (isinstance(vs, list) and isinstance(sq, list) and isinstance(lq, list)):
-        return False
-    if len(vs) != 3 or len(sq) != 3 or len(lq) != 3:
-        return False
-        
-    all_questions = vs + sq + lq
-    question_texts = set()
-    answers_set = set()
-    
-    for idx, q in enumerate(all_questions):
-        if not isinstance(q, dict):
-            return False
-            
+    if not active:
+        active = [
+            {"id": "sec-1", "name": "Very Short Answer", "type": "Very Short Answer", "enabled": True, "question_count": 3, "marks_per_question": 2, "expected_length": "1-10 words", "difficulty": "Easy"},
+            {"id": "sec-2", "name": "Short Answer", "type": "Short Answer", "enabled": True, "question_count": 3, "marks_per_question": 4, "expected_length": "40-60 words", "difficulty": "Medium"},
+            {"id": "sec-3", "name": "Long Answer", "type": "Long Answer", "enabled": True, "question_count": 3, "marks_per_question": 8, "expected_length": "150-250 words", "difficulty": "Hard"}
+        ]
+    return active
+
+def parse_and_validate_ai_response(
+    raw_res: str,
+    active_sections: List[Dict[str, Any]],
+    chapter_title: str,
+    chapter_text: str
+) -> Optional[Dict[str, Any]]:
+    """Parse raw AI JSON output and group questions into requested active sections."""
+    try:
+        parsed = extract_json_from_text(raw_res)
+    except Exception as e:
+        logger.warning(f"JSON parsing error: {e}")
+        return None
+
+    # Collect questions from JSON structure
+    extracted_q_list = []
+    if isinstance(parsed, dict):
+        if "sections" in parsed and isinstance(parsed["sections"], list):
+            for sec_obj in parsed["sections"]:
+                if isinstance(sec_obj, dict) and "questions" in sec_obj and isinstance(sec_obj["questions"], list):
+                    sec_name_val = sec_obj.get("section_name", "")
+                    for q in sec_obj["questions"]:
+                        if isinstance(q, dict):
+                            if not q.get("section_name") and sec_name_val:
+                                q["section_name"] = sec_name_val
+                            extracted_q_list.append(q)
+        else:
+            for k in ["questions", "very_short_questions", "short_questions", "long_questions", "all_questions"]:
+                if k in parsed and isinstance(parsed[k], list):
+                    extracted_q_list.extend([q for q in parsed[k] if isinstance(q, dict)])
+    elif isinstance(parsed, list):
+        extracted_q_list = [q for q in parsed if isinstance(q, dict)]
+
+    if not extracted_q_list:
+        return None
+
+    # Clean & validate individual questions
+    valid_questions = []
+    seen_texts = set()
+    for q in extracted_q_list:
         q_text = q.get("question_text", "").strip()
-        ans = q.get("answer", "").strip()
+        if not q_text or len(q_text) < 8 or q_text.lower() in seen_texts:
+            continue
+        seen_texts.add(q_text.lower())
+        
         topic = q.get("related_topic", "").strip()
-        
-        if not q_text or len(q_text) < 10:
-            return False
-        if q_text.lower() in question_texts:
-            logger.warning(f"Duplicate question text detected: {q_text}")
-            return False
-        question_texts.add(q_text.lower())
-        
-        # Ensure answer is not empty or generic
-        if not ans:
-            q["answer"] = extract_grounded_answer_from_text(q_text, topic or chapter_title, chapter_text, max_words=60)
-        elif len(ans) > 1000 and len(ans) > len(chapter_text) * 0.5:
-            # Answer is dumping entire chapter
-            q["answer"] = extract_grounded_answer_from_text(q_text, topic or chapter_title, chapter_text, max_words=60)
-            
-        answers_set.add(q["answer"].strip().lower())
-        
-        # Ensure topic is not generically 'Overview' repeatedly
         if not topic or topic.lower() in ["overview", "general", "none", "chapter overview"]:
-            q["related_topic"] = f"Topic {idx + 1}: {q_text[:25]}"
+            q["related_topic"] = f"Topic: {q_text[:25]}"
             
-        # Ensure ID exists
+        ans = q.get("answer", "").strip()
+        if not ans or len(ans) > len(chapter_text) * 0.5:
+            q["answer"] = extract_grounded_answer_from_text(q_text, topic or chapter_title, chapter_text, max_words=60)
+            
         if not q.get("id"):
             q["id"] = str(uuid.uuid4())
             
-        # Fix marking points if missing
-        if not q.get("marking_points") or not isinstance(q.get("marking_points"), list):
-            marks = q.get("marks", 2)
-            q["marking_points"] = [f"Correct assessment & explanation ({marks} marks)"]
-            
-        if not q.get("expected_length"):
-            q_type = q.get("question_type", "")
-            q["expected_length"] = "1-10 words" if "Very Short" in q_type else ("40-60 words" if "Short" in q_type else "150-250 words")
+        valid_questions.append(q)
 
-    return True
+    if not valid_questions:
+        return None
+
+    # Distribute valid questions among active sections
+    all_final_questions = []
+    vs_list = []
+    sq_list = []
+    lq_list = []
+    global_num = 1
+    unassigned_pool = list(valid_questions)
+
+    for sec in active_sections:
+        sec_name = sec["name"]
+        sec_type = sec["type"]
+        req_count = sec["question_count"]
+        marks = sec["marks_per_question"]
+        expected_len = sec.get("expected_length", "Standard")
+
+        # Find matching questions for this section
+        matched = []
+        remaining_pool = []
+        for q in unassigned_pool:
+            q_sec = q.get("section_name", "")
+            q_type = q.get("question_type", "")
+            if (q_sec and q_sec.lower() == sec_name.lower()) or (q_type and q_type.lower() in sec_name.lower()) or (q_type and q_type.lower() in sec_type.lower()):
+                matched.append(q)
+            else:
+                remaining_pool.append(q)
+                
+        unassigned_pool = remaining_pool
+
+        # If matching couldn't satisfy count, take from unassigned pool
+        while len(matched) < req_count and unassigned_pool:
+            matched.append(unassigned_pool.pop(0))
+
+        # Assign section attributes to matched questions
+        for q in matched[:req_count]:
+            q["question_number"] = global_num
+            q["section_name"] = sec_name
+            q["question_type"] = sec_type
+            q["marks"] = marks
+            q["expected_length"] = q.get("expected_length") or expected_len
+            if not q.get("marking_points"):
+                q["marking_points"] = [f"Correct assessment & response ({marks} marks)"]
+
+            all_final_questions.append(q)
+            if "Very Short" in sec_type:
+                vs_list.append(q)
+            elif "Short" in sec_type:
+                sq_list.append(q)
+            else:
+                lq_list.append(q)
+
+            global_num += 1
+
+    total_expected = sum(s["question_count"] for s in active_sections)
+    if len(all_final_questions) < total_expected:
+        logger.warning(f"Parsed {len(all_final_questions)} questions, but {total_expected} were requested.")
+        return None
+
+    return {
+        "very_short_questions": vs_list,
+        "short_questions": sq_list,
+        "long_questions": lq_list,
+        "all_questions": all_final_questions,
+        "sections": active_sections
+    }
 
 def generate_questions_from_chapter(
     chapter_title: str,
@@ -256,52 +353,44 @@ def generate_questions_from_chapter(
     marks_dist: Optional[Dict[str, int]] = None,
     special_instructions: str = "",
     user_api_key: Optional[str] = None
-) -> Dict[str, List[Dict[str, Any]]]:
+) -> Dict[str, Any]:
     """
-    Core function to generate exactly 3 Very Short, 3 Short, and 3 Long answer questions.
+    Core function to generate questions dynamically based on configured sections.
     """
-    if not marks_dist:
-        marks_dist = {"very_short": 2, "short": 4, "long": 8}
-        
+    active_sections = normalize_sections_config(sections)
     chunked_text = chunk_text_if_needed(chapter_text, max_words=4000)
     word_count = len(chapter_text.split())
-    logger.info(f"Generating questions for '{chapter_title}' (Text length: {len(chapter_text)} chars, ~{word_count} words). Preview: {chapter_text[:100]!r}")
-    
+    total_requested_questions = sum(s["question_count"] for s in active_sections)
+
+    logger.info(f"Generating {total_requested_questions} questions across {len(active_sections)} sections for '{chapter_title}'.")
+
+    sec_descriptions = []
+    for idx, s in enumerate(active_sections, start=1):
+        sec_descriptions.append(
+            f"Section {idx}: \"{s['name']}\" (Type: {s['type']}, Questions Needed: EXACTLY {s['question_count']}, {s['marks_per_question']} marks each, Length: {s.get('expected_length', 'Standard')})"
+        )
+    sec_prompt_str = "\n".join(sec_descriptions)
+
     prompt = f"""
 You are an expert educational curriculum designer and question paper creator.
-Your task is to analyze the following chapter text and generate EXACTLY 9 questions based ONLY on the provided text.
-For EVERY question, you MUST generate a separate, specific model answer that directly answers the question, a question-specific marking scheme, and expected length.
+Analyze the provided chapter text and generate EXACTLY {total_requested_questions} questions across the following {len(active_sections)} sections based ONLY on the provided text.
 
 CHAPTER METADATA:
 - Chapter Title: {chapter_title}
 - Subject: {subject}
 - Grade/Class: {grade}
 - Education Board: {board}
-- Target Language: {language} (Ensure all questions and text are written in {language})
+- Target Language: {language}
 - Overall Difficulty Level: {difficulty}
 - Special Instructions: {special_instructions or "None"}
 
-CATEGORIES REQUIRED:
-1. Very Short Answer Questions: EXACTLY 3 questions ({marks_dist.get('very_short', 2)} marks each).
-   - Test definitions, facts, character names, or core identification in the text.
-   - Model Answer: Direct and concise (1 to 10 words).
-   - Marking Scheme: Explicit breakdown totaling {marks_dist.get('very_short', 2)} marks.
-   - Topic: Specific section/concept name from the text (DO NOT use "Overview").
-2. Short Answer Questions: EXACTLY 3 questions ({marks_dist.get('short', 4)} marks each).
-   - Test conceptual understanding, key points, or explanations.
-   - Model Answer: Explanatory and structured (40 to 60 words).
-   - Marking Scheme: Explicit breakdown totaling {marks_dist.get('short', 4)} marks.
-   - Topic: Specific section/concept name from the text (DO NOT use "Overview").
-3. Long Answer Questions: EXACTLY 3 questions ({marks_dist.get('long', 8)} marks each).
-   - Test detailed explanation, analytical thinking, or multi-step reasoning.
-   - Model Answer: Detailed and structured (150 to 250 words).
-   - Marking Scheme: Explicit breakdown totaling {marks_dist.get('long', 8)} marks.
-   - Topic: Specific section/concept name from the text (DO NOT use "Overview").
+SECTIONS REQUIRED:
+{sec_prompt_str}
 
 RULES:
 - Base every single question and model answer directly on the provided chapter text below. Do NOT invent facts or characters.
-- Every single question MUST have its OWN UNIQUE model answer answering that question. Do NOT copy the entire chapter text or generic template strings into the answer.
-- Each of the 9 questions MUST have a distinct `related_topic` reflecting the specific concept tested. NEVER assign "Overview" to all questions.
+- Generate EXACTLY the requested question count for each section.
+- Every single question MUST have its OWN UNIQUE model answer answering that question and specific marking scheme.
 - Return ONLY a valid JSON object matching the EXACT JSON structure below.
 
 CHAPTER TEXT CONTENT:
@@ -311,162 +400,67 @@ CHAPTER TEXT CONTENT:
 
 REQUIRED JSON OUTPUT FORMAT:
 {{
-  "very_short_questions": [
+  "sections": [
     {{
-      "question_number": 1,
-      "question_text": "...",
-      "question_type": "Very Short Answer",
-      "difficulty": "{difficulty}",
-      "marks": {marks_dist.get('very_short', 2)},
-      "related_topic": "Specific Topic Name",
-      "answer": "Concise direct answer to question 1.",
-      "marking_points": ["Correct definition/identification ({marks_dist.get('very_short', 2)} marks)"],
-      "expected_length": "1-10 words"
-    }},
-    {{
-      "question_number": 2,
-      "question_text": "...",
-      "question_type": "Very Short Answer",
-      "difficulty": "{difficulty}",
-      "marks": {marks_dist.get('very_short', 2)},
-      "related_topic": "Specific Topic Name",
-      "answer": "Concise direct answer to question 2.",
-      "marking_points": ["Correct definition/identification ({marks_dist.get('very_short', 2)} marks)"],
-      "expected_length": "1-10 words"
-    }},
-    {{
-      "question_number": 3,
-      "question_text": "...",
-      "question_type": "Very Short Answer",
-      "difficulty": "{difficulty}",
-      "marks": {marks_dist.get('very_short', 2)},
-      "related_topic": "Specific Topic Name",
-      "answer": "Concise direct answer to question 3.",
-      "marking_points": ["Correct definition/identification ({marks_dist.get('very_short', 2)} marks)"],
-      "expected_length": "1-10 words"
-    }}
-  ],
-  "short_questions": [
-    {{
-      "question_number": 4,
-      "question_text": "...",
-      "question_type": "Short Answer",
-      "difficulty": "{difficulty}",
-      "marks": {marks_dist.get('short', 4)},
-      "related_topic": "Specific Topic Name",
-      "answer": "Explanatory answer to question 4.",
-      "marking_points": ["Point 1 (2 marks)", "Point 2 (2 marks)"],
-      "expected_length": "40-60 words"
-    }},
-    {{
-      "question_number": 5,
-      "question_text": "...",
-      "question_type": "Short Answer",
-      "difficulty": "{difficulty}",
-      "marks": {marks_dist.get('short', 4)},
-      "related_topic": "Specific Topic Name",
-      "answer": "Explanatory answer to question 5.",
-      "marking_points": ["Point 1 (2 marks)", "Point 2 (2 marks)"],
-      "expected_length": "40-60 words"
-    }},
-    {{
-      "question_number": 6,
-      "question_text": "...",
-      "question_type": "Short Answer",
-      "difficulty": "{difficulty}",
-      "marks": {marks_dist.get('short', 4)},
-      "related_topic": "Specific Topic Name",
-      "answer": "Explanatory answer to question 6.",
-      "marking_points": ["Point 1 (2 marks)", "Point 2 (2 marks)"],
-      "expected_length": "40-60 words"
-    }}
-  ],
-  "long_questions": [
-    {{
-      "question_number": 7,
-      "question_text": "...",
-      "question_type": "Long Answer",
-      "difficulty": "{difficulty}",
-      "marks": {marks_dist.get('long', 8)},
-      "related_topic": "Specific Topic Name",
-      "answer": "Comprehensive answer to question 7.",
-      "marking_points": ["Intro (2 marks)", "Key Points (4 marks)", "Conclusion (2 marks)"],
-      "expected_length": "150-250 words"
-    }},
-    {{
-      "question_number": 8,
-      "question_text": "...",
-      "question_type": "Long Answer",
-      "difficulty": "{difficulty}",
-      "marks": {marks_dist.get('long', 8)},
-      "related_topic": "Specific Topic Name",
-      "answer": "Comprehensive answer to question 8.",
-      "marking_points": ["Intro (2 marks)", "Key Points (4 marks)", "Conclusion (2 marks)"],
-      "expected_length": "150-250 words"
-    }},
-    {{
-      "question_number": 9,
-      "question_text": "...",
-      "question_type": "Long Answer",
-      "difficulty": "{difficulty}",
-      "marks": {marks_dist.get('long', 8)},
-      "related_topic": "Specific Topic Name",
-      "answer": "Comprehensive answer to question 9.",
-      "marking_points": ["Intro (2 marks)", "Key Points (4 marks)", "Conclusion (2 marks)"],
-      "expected_length": "150-250 words"
+      "section_name": "{active_sections[0]['name']}",
+      "questions": [
+        {{
+          "question_number": 1,
+          "question_text": "...",
+          "question_type": "{active_sections[0]['type']}",
+          "difficulty": "{difficulty}",
+          "marks": {active_sections[0]['marks_per_question']},
+          "related_topic": "Specific Topic Name",
+          "answer": "Concise direct answer.",
+          "marking_points": ["Correct response ({active_sections[0]['marks_per_question']} marks)"],
+          "expected_length": "{active_sections[0].get('expected_length', 'Standard')}"
+        }}
+      ]
     }}
   ]
 }}
 """
 
-    # 1. Try Groq API Provider first (with retry)
+    # 1. Try Groq / xAI API Provider
     for attempt in range(2):
-        groq_res = call_groq_api(prompt, user_api_key)
-        if groq_res:
-            try:
-                data = extract_json_from_text(groq_res)
-                if validate_and_clean_questions_output(data, chapter_title, chapter_text):
-                    logger.info("Successfully validated Groq AI question response!")
-                    return data
-                else:
-                    logger.warning(f"Groq AI response failed schema validation on attempt {attempt + 1}")
-            except Exception as e:
-                logger.warning(f"Failed to parse Groq response JSON on attempt {attempt + 1}: {e}")
+        res_text = call_groq_api(prompt, user_api_key)
+        if res_text:
+            result = parse_and_validate_ai_response(res_text, active_sections, chapter_title, chapter_text)
+            if result:
+                logger.info(f"Successfully generated {len(result['all_questions'])} questions via Groq/xAI API!")
+                return result
 
-    # 2. Try Gemini REST API Provider second
-    gemini_res = call_gemini_api_rest(prompt, user_api_key)
-    if gemini_res:
-        try:
-            data = extract_json_from_text(gemini_res)
-            if validate_and_clean_questions_output(data, chapter_title, chapter_text):
-                logger.info("Successfully validated Gemini REST AI question response!")
-                return data
-        except Exception as e:
-            logger.warning(f"Failed to parse Gemini REST response JSON: {e}")
+    # 2. Try Gemini REST API Provider
+    res_text = call_gemini_api_rest(prompt, user_api_key)
+    if res_text:
+        result = parse_and_validate_ai_response(res_text, active_sections, chapter_title, chapter_text)
+        if result:
+            logger.info(f"Successfully generated {len(result['all_questions'])} questions via Gemini REST API!")
+            return result
 
-    # 3. Try Gemini SDK Client Provider third
+    # 3. Try Gemini SDK Client Provider
     client = get_gemini_client(user_api_key)
     if client:
         try:
             logger.info("Calling Gemini API Provider SDK...")
             raw_response = ""
             if hasattr(client, "models"):
-                response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+                response = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
                 raw_response = response.text
             elif hasattr(client, "GenerativeModel"):
                 model = client.GenerativeModel("gemini-1.5-flash")
                 response = model.generate_content(prompt)
                 raw_response = response.text
                 
-            data = extract_json_from_text(raw_response)
-            if validate_and_clean_questions_output(data, chapter_title, chapter_text):
-                logger.info("Successfully validated Gemini AI question response!")
-                return data
+            result = parse_and_validate_ai_response(raw_response, active_sections, chapter_title, chapter_text)
+            if result:
+                logger.info(f"Successfully generated {len(result['all_questions'])} questions via Gemini SDK!")
+                return result
         except Exception as e:
-            logger.error(f"Error calling Gemini API SDK: {e}")
+            logger.error(f"Gemini API SDK error: {e}")
 
-    # 3. Smart Semantic Fallback Question Generator
-    logger.info("Executing Smart Semantic Fallback Question Generator...")
+    # 4. Smart Semantic Fallback Question Generator
+    logger.info("Executing Smart Semantic Fallback Question Generator for dynamic sections...")
     return generate_fallback_questions(
         chapter_title=chapter_title,
         chapter_text=chapter_text,
@@ -474,7 +468,7 @@ REQUIRED JSON OUTPUT FORMAT:
         grade=grade,
         language=language,
         difficulty=difficulty,
-        marks_dist=marks_dist
+        sections=active_sections
     )
 
 def generate_single_replacement_question(
@@ -708,23 +702,21 @@ def generate_fallback_questions(
     grade: str,
     language: str = "English",
     difficulty: str = "Medium",
-    marks_dist: Dict[str, int] = None
-) -> Dict[str, List[Dict[str, Any]]]:
+    sections: Optional[List[Dict[str, Any]]] = None,
+    marks_dist: Optional[Dict[str, int]] = None
+) -> Dict[str, Any]:
     """
     Smart Semantic Fallback Generator:
     Divides chapter text into distinct paragraphs/sections and extracts unique questions 
-    and answers for each section so that every question tests a different part of the document!
+    and answers dynamically based on active configured sections!
     """
+    active_sections = normalize_sections_config(sections)
     cleaned_full = chapter_text.strip()
 
-    # Clean chapter title string if it contains filename noise like "10 page story" or ".pdf"
     clean_title = re.sub(r'\s*\d+\s*page\s*story.*$', '', chapter_title, flags=re.IGNORECASE)
     clean_title = re.sub(r'\.pdf$', '', clean_title, flags=re.IGNORECASE)
-    clean_title = clean_title.replace('_', ' ').replace('-', ' ').strip().title()
-    if not clean_title:
-        clean_title = "The Chapter"
+    clean_title = clean_title.replace('_', ' ').replace('-', ' ').strip().title() or "The Chapter"
     
-    # Split by double newline or sentence groups into distinct paragraph blocks
     raw_paras = [p.strip() for p in re.split(r'\n\n+', cleaned_full) if len(p.strip()) > 30]
     if len(raw_paras) < 3:
         sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', cleaned_full) if len(s.strip()) > 15]
@@ -734,8 +726,8 @@ def generate_fallback_questions(
         raw_paras = [cleaned_full]
 
     paragraphs = list(raw_paras)
-    # Ensure we have at least 9 distinct paragraph/sentence blocks so all 9 questions get unique content
-    if len(paragraphs) < 9:
+    total_q_needed = sum(s["question_count"] for s in active_sections)
+    if len(paragraphs) < total_q_needed:
         fine_paragraphs = []
         for p in paragraphs:
             s_list = [s.strip() for s in re.split(r'(?<=[.!?])\s+', p) if len(s.strip()) > 15]
@@ -750,7 +742,6 @@ def generate_fallback_questions(
 
     def get_unique_section_topic(p_text: str, p_idx: int) -> str:
         p_clean = p_text.replace('\r', '').strip()
-        # 1. Check if section starts with a clean section title/heading line
         lines = [l.strip() for l in p_clean.splitlines() if l.strip()]
         if lines:
             first_line = re.sub(r'^\d+[\.\:]\s*', '', lines[0]).strip()
@@ -758,14 +749,12 @@ def generate_fallback_questions(
             if 2 <= len(first_line.split()) <= 7 and not first_line.endswith('.') and not first_line.lower().startswith(("part", "chapter", "section", "page")):
                 return first_line.title()
                 
-        # 2. Extract multi-word proper noun phrases (e.g. "Moonbay Harbor", "Keeper's Journal")
         prop_nouns = re.findall(r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b', p_clean.replace('\n', ' '))
         skip = {"The Garden", "The Clockmaker", "The Lighthouse", "Very Short", "Short Answer", "Long Answer", "Moonbay"}
         valid_props = [p for p in prop_nouns if p not in skip]
         if valid_props:
             return valid_props[0].title()
 
-        # 3. Clean keywords
         stop_words = {"chapter", "section", "story", "the", "this", "that", "where", "which", "would", "could", "should", "about", "testing", "stands", "found", "with", "from", "they", "there", "page", "when", "into", "through", "small", "carried", "inserted", "stated", "regarding", "significance", "described", "text", "narrative", "weeks", "followed", "people", "hill", "climbing", "midday", "last", "town", "listen", "choice", "stay", "light", "tomorrow", "northern", "edge", "seventy", "years", "guided", "modern", "satellite"}
         words = re.findall(r'\b[A-Z][a-z]{3,}\b|\b[a-z]{4,}\b', p_text)
         key_words = []
@@ -780,115 +769,74 @@ def generate_fallback_questions(
             return f"{key_words[0]} Context"
         return f"Narrative Event {p_idx + 1}"
 
-    vs_marks = marks_dist.get("very_short", 2) if marks_dist else 2
-    s_marks = marks_dist.get("short", 4) if marks_dist else 4
-    l_marks = marks_dist.get("long", 8) if marks_dist else 8
-
-    vs_templates = [
-        "What specific detail is stated regarding {topic} in the text?",
-        "According to the text, what key fact is revealed about {topic}?",
-        "Briefly state what is described concerning {topic} in the chapter."
-    ]
-
+    all_questions = []
     vs_list = []
-    for i in range(3):
-        p_idx = i % num_paras
-        p_content = paragraphs[p_idx]
-        topic = get_unique_section_topic(p_content, p_idx)
-        
-        q_text = vs_templates[i % len(vs_templates)].format(topic=topic)
-        ans = extract_grounded_answer_from_text(q_text, topic, p_content, max_words=25)
-        
-        vs_list.append({
-            "id": str(uuid.uuid4()),
-            "question_number": i + 1,
-            "question_text": q_text,
-            "question_type": "Very Short Answer",
-            "difficulty": difficulty,
-            "marks": vs_marks,
-            "related_topic": f"Part {p_idx + 1}: {topic}",
-            "answer": ans,
-            "marking_points": [f"Correct fact/definition identification ({vs_marks} marks)"],
-            "expected_length": "1 - 10 words"
-        })
-
-    sq_templates = [
-        "Explain the significance of {topic} as presented in the chapter narrative.",
-        "How is {topic} described in the text, and why is it important to the events?",
-        "Describe the context and impact of {topic} in this part of the story."
-    ]
-
     sq_list = []
-    for i in range(3):
-        p_idx = (i + 3) % num_paras
-        p_content = paragraphs[p_idx] + " " + paragraphs[(p_idx + 1) % num_paras]
-        topic = get_unique_section_topic(p_content, p_idx)
-        
-        q_text = sq_templates[i % len(sq_templates)].format(topic=topic)
-        ans = extract_grounded_answer_from_text(q_text, topic, p_content, max_words=60)
-        p1 = s_marks // 2
-        p2 = s_marks - p1
-        
-        sq_list.append({
-            "id": str(uuid.uuid4()),
-            "question_number": i + 4,
-            "question_text": q_text,
-            "question_type": "Short Answer",
-            "difficulty": difficulty,
-            "marks": s_marks,
-            "related_topic": f"Part {p_idx + 1}: {topic}",
-            "answer": ans,
-            "marking_points": [f"Identification of concept ({p1} marks)", f"Explanation & context ({p2} marks)"],
-            "expected_length": "40 - 60 words"
-        })
-
-    lq_templates = [
-        "Provide a comprehensive analysis of {topic}, explaining its key components, background, and broader outcome.",
-        "Analyze how {topic} develops through the events described, examining its overall impact on the chapter.",
-        "Discuss in detail the role of {topic}, supported by evidence and observations from the text."
-    ]
-    
-    prefixes = [
-        "A detailed analysis of this section shows that ",
-        "Examining the key events in this part reveals ",
-        "Analyzing the conclusion of the chapter demonstrates "
-    ]
-    
     lq_list = []
-    for i in range(3):
-        p_idx1 = (i + 6) % num_paras
-        p_idx2 = (i + 7) % num_paras
-        p_idx3 = (i + 8) % num_paras
-        p_content = paragraphs[p_idx1] + " " + paragraphs[p_idx2] + " " + paragraphs[p_idx3]
-        topic = get_unique_section_topic(p_content, p_idx1)
-        
-        q_text = lq_templates[i % len(lq_templates)].format(topic=topic)
-        raw_ans = extract_grounded_answer_from_text(q_text, topic, p_content, max_words=180)
-        ans = prefixes[i] + raw_ans[0].lower() + raw_ans[1:] if raw_ans else prefixes[i] + p_content[:250]
-        
-        p1 = l_marks // 4
-        p2 = l_marks // 2
-        p3 = l_marks - p1 - p2
-        
-        lq_list.append({
-            "id": str(uuid.uuid4()),
-            "question_number": i + 7,
-            "question_text": q_text,
-            "question_type": "Long Answer",
-            "difficulty": difficulty,
-            "marks": l_marks,
-            "related_topic": f"Section Analysis {i + 1}: {topic}",
-            "answer": ans,
-            "marking_points": [
-                f"Introduction & core principle ({p1} marks)",
-                f"Detailed multi-step analysis ({p2} marks)",
-                f"Conclusion & impact ({p3} marks)"
-            ],
-            "expected_length": "150 - 250 words"
-        })
+
+    global_q_num = 1
+    para_cursor = 0
+
+    for sec in active_sections:
+        sec_name = sec["name"]
+        sec_type = sec["type"]
+        q_count = sec["question_count"]
+        marks = sec["marks_per_question"]
+        expected_len = sec.get("expected_length") or ("1 - 10 words" if "Very Short" in sec_type else ("40 - 60 words" if "Short" in sec_type else "150 - 250 words"))
+
+        for i in range(q_count):
+            p_idx = para_cursor % num_paras
+            para_cursor += 1
+            p_content = paragraphs[p_idx]
+            topic = get_unique_section_topic(p_content, p_idx)
+
+            if "Very Short" in sec_type or marks <= 2:
+                q_text = f"What key detail or fact is described regarding {topic} in the text?"
+                ans = extract_grounded_answer_from_text(q_text, topic, p_content, max_words=25)
+                mp = [f"Correct fact/definition identification ({marks} marks)"]
+            elif "Short" in sec_type or marks <= 5:
+                q_text = f"Explain the significance of {topic} as presented in the chapter narrative."
+                ans = extract_grounded_answer_from_text(q_text, topic, p_content, max_words=60)
+                p1 = marks // 2
+                p2 = marks - p1
+                mp = [f"Identification of concept ({p1} marks)", f"Explanation & context ({p2} marks)"]
+            else:
+                q_text = f"Provide a comprehensive analysis of {topic}, explaining its background, core mechanisms, and broader outcome."
+                raw_ans = extract_grounded_answer_from_text(q_text, topic, p_content, max_words=180)
+                ans = f"A detailed analysis of this section shows that {raw_ans[0].lower() + raw_ans[1:] if raw_ans else p_content[:250]}"
+                p1 = marks // 4
+                p2 = marks // 2
+                p3 = marks - p1 - p2
+                mp = [f"Introduction & context ({p1} marks)", f"Detailed analysis ({p2} marks)", f"Conclusion ({p3} marks)"]
+
+            q_obj = {
+                "id": str(uuid.uuid4()),
+                "question_number": global_q_num,
+                "question_text": q_text,
+                "question_type": sec_type,
+                "difficulty": sec.get("difficulty", difficulty),
+                "marks": marks,
+                "related_topic": f"Part {p_idx + 1}: {topic}",
+                "section_name": sec_name,
+                "answer": ans,
+                "marking_points": mp,
+                "expected_length": expected_len
+            }
+
+            all_questions.append(q_obj)
+            if "Very Short" in sec_type:
+                vs_list.append(q_obj)
+            elif "Short" in sec_type:
+                sq_list.append(q_obj)
+            else:
+                lq_list.append(q_obj)
+
+            global_q_num += 1
 
     return {
         "very_short_questions": vs_list,
         "short_questions": sq_list,
-        "long_questions": lq_list
+        "long_questions": lq_list,
+        "all_questions": all_questions,
+        "sections": active_sections
     }

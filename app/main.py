@@ -237,6 +237,15 @@ def generate_questions(
             raise HTTPException(status_code=400, detail="Chapter content is empty or contains insufficient text.")
 
         sec_dicts = [s.dict() for s in req.sections] if req.sections else None
+        if sec_dicts:
+            enabled_secs = [s for s in sec_dicts if s.get("enabled", True)]
+            if not enabled_secs:
+                raise HTTPException(status_code=400, detail="Please enable at least one section to generate questions.")
+            total_req = sum(int(s.get("question_count", 0)) for s in enabled_secs)
+            if total_req > 100:
+                raise HTTPException(status_code=400, detail="Maximum 100 total questions allowed per question paper request. Please adjust your section counts.")
+            if total_req <= 0:
+                raise HTTPException(status_code=400, detail="Question count for enabled sections must be at least 1.")
 
         generated_data = ai_engine.generate_questions_from_chapter(
             chapter_title=req.chapter_title,
