@@ -122,5 +122,109 @@ class TestAIAssistantChat(unittest.TestCase):
         self.assertNotIn("AIza", raw_json)
         self.assertNotIn("gsk_", raw_json)
 
+    def test_voice_transcription_suite(self):
+        # 1. Register User for Voice Testing
+        res_reg = self.client.post("/api/auth/register", json={
+            "email": "teacher_voice_test@test.com",
+            "password": "Password123!",
+            "full_name": "Teacher Voice Test"
+        })
+        if res_reg.status_code != 200:
+            res_reg = self.client.post("/api/auth/login", json={
+                "email": "teacher_voice_test@test.com",
+                "password": "Password123!"
+            })
+        token = res_reg.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # Mock successful Groq audio transcription response
+        def mock_transcribe_success(file_bytes, filename="recording.webm", language=None, user_api_key=None):
+            if language == "hi":
+                return "प्रकाश संश्लेषण क्या है? (What is photosynthesis?)"
+            return "Explain the process of photosynthesis for Class 8 students."
+
+        # Test A: Successful Transcription (English & Hindi)
+        with patch("app.ai_engine.transcribe_audio_with_groq", side_effect=mock_transcribe_success):
+            dummy_audio = b"RIFF....WAVEfmt ....data...." + b"\x00" * 200
+            
+            res_en = self.client.post(
+                "/api/ai/voice/transcribe",
+                files={"file": ("recording.webm", dummy_audio, "audio/webm")},
+                data={"language": "en"},
+                headers=headers
+            )
+            self.assertEqual(res_en.status_code, 200)
+            self.assertIn("photosynthesis", res_en.json()["transcript"].lower())
+
+            res_hi = self.client.post(
+                "/api/ai/voice/transcribe",
+                files={"file": ("recording_hi.webm", dummy_audio, "audio/webm")},
+                data={"language": "hi"},
+                headers=headers
+            )
+            self.assertEqual(res_hi.status_code, 200)
+            self.assertIn("प्रकाश संश्लेषण", res_hi.json()["transcript"])
+
+        # Test B: Unauthenticated Request (401)
+        res_unauth = self.client.post(
+            "/api/ai/voice/transcribe",
+            files={"file": ("recording.webm", b"1234567890", "audio/webm")}
+        )
+        self.assertEqual(res_unauth.status_code, 401)
+
+        # Test C: Empty Audio Payload (400)
+        res_empty = self.client.post(
+            "/api/ai/voice/transcribe",
+            files={"file": ("empty.webm", b"", "audio/webm")},
+            headers=headers
+        )
+        self.assertEqual(res_empty.status_code, 400)
+        self.assertIn("empty audio", res_empty.json()["detail"].lower())
+
+        # Test D: Oversized Audio Payload > 10MB (400)
+        oversized_bytes = b"0" * (10 * 1024 * 1024 + 1024)
+        res_large = self.client.post(
+            "/api/ai/voice/transcribe",
+            files={"file": ("huge.webm", oversized_bytes, "audio/webm")},
+            headers=headers
+        )
+        self.assertEqual(res_large.status_code, 400)
+        self.assertIn("exceeds maximum limit", res_large.json()["detail"].lower())
+
+        # Test E: Unsupported File Format (400)
+        res_unsupported = self.client.post(
+            "/api/ai/voice/transcribe",
+            files={"file": ("document.exe", b"executable bytes", "application/x-msdownload")},
+            headers=headers
+        )
+        self.assertEqual(res_unsupported.status_code, 400)
+        self.assertIn("unsupported audio format", res_unsupported.json()["detail"].lower())
+
+        # Test F: Missing API Key Error Handling (503)
+        def mock_transcribe_nokey(*args, **kwargs):
+            raise ValueError("Voice transcription provider is not configured. Please ensure GROQ_API_KEY is configured in server environment variables.")
+
+        with patch("app.ai_engine.transcribe_audio_with_groq", side_effect=mock_transcribe_nokey):
+            res_nokey = self.client.post(
+                "/api/ai/voice/transcribe",
+                files={"file": ("recording.webm", b"1234567890", "audio/webm")},
+                headers=headers
+            )
+            self.assertEqual(res_nokey.status_code, 503)
+
+        # Test G: Provider Authentication Failure (401)
+        def mock_transcribe_401(*args, **kwargs):
+            raise ValueError("Groq API authentication failed (HTTP 401). Please check server GROQ_API_KEY configuration.")
+
+        with patch("app.ai_engine.transcribe_audio_with_groq", side_effect=mock_transcribe_401):
+            res_401 = self.client.post(
+                "/api/ai/voice/transcribe",
+                files={"file": ("recording.webm", b"1234567890", "audio/webm")},
+                headers=headers
+            )
+            self.assertEqual(res_401.status_code, 401)
+            self.assertNotIn("gsk_", res_401.text) # Verify no API key leaked!
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -65,6 +65,102 @@ def call_groq_api(prompt: str, user_api_key: Optional[str] = None) -> Optional[s
 
     return None
 
+def transcribe_audio_with_groq(
+    file_bytes: bytes,
+    filename: str = "recording.webm",
+    language: Optional[str] = None,
+    user_api_key: Optional[str] = None
+) -> str:
+    """
+    Transcribe recorded audio using Groq official Speech-to-Text API.
+    Primary model: whisper-large-v3-turbo (fast)
+    Fallback model: whisper-large-v3
+    Supports ISO-639-1 language parameter (e.g. 'en', 'hi').
+    """
+    if not file_bytes or len(file_bytes) == 0:
+        raise ValueError("Audio recording payload is empty.")
+
+    raw_key = user_api_key or os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY") or getattr(settings, "GROQ_API_KEY", None)
+    api_key = clean_api_key(raw_key)
+    if not api_key:
+        raise ValueError("Voice transcription provider is not configured. Please ensure GROQ_API_KEY is configured in server environment variables.")
+
+    url = "https://api.groq.com/openai/v1/audio/transcriptions"
+    models_to_try = ["whisper-large-v3-turbo", "whisper-large-v3"]
+
+    # Language code mapping for ISO-639-1
+    lang_code = None
+    if language:
+        clean_lang = language.strip().lower()
+        if clean_lang in ["hi", "hindi", "hi-in"]:
+            lang_code = "hi"
+        elif clean_lang in ["en", "english", "en-us", "en-gb"]:
+            lang_code = "en"
+        elif len(clean_lang) == 2:
+            lang_code = clean_lang
+
+    last_error = None
+    for model_name in models_to_try:
+        boundary = f"----TeachGenieBoundary{uuid.uuid4().hex}"
+        body = bytearray()
+
+        # 1. file field
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode("utf-8"))
+        body.extend(b"Content-Type: application/octet-stream\r\n\r\n")
+        body.extend(file_bytes)
+        body.extend(b"\r\n")
+
+        # 2. model field
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(f'Content-Disposition: form-data; name="model"\r\n\r\n'.encode("utf-8"))
+        body.extend(f"{model_name}\r\n".encode("utf-8"))
+
+        # 3. language field (optional)
+        if lang_code:
+            body.extend(f"--{boundary}\r\n".encode("utf-8"))
+            body.extend(f'Content-Disposition: form-data; name="language"\r\n\r\n'.encode("utf-8"))
+            body.extend(f"{lang_code}\r\n".encode("utf-8"))
+
+        # 4. response_format
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(f'Content-Disposition: form-data; name="response_format"\r\n\r\n'.encode("utf-8"))
+        body.extend(b"json\r\n")
+
+        body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "User-Agent": "TeachGenie-AI/1.0 (FastAPI Backend)"
+        }
+
+        try:
+            req = urllib.request.Request(url, data=bytes(body), headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=30) as response:
+                res_body = json.loads(response.read().decode("utf-8"))
+                transcript = res_body.get("text", "").strip()
+                if transcript:
+                    logger.info(f"Audio transcription succeeded via Groq model: {model_name}")
+                    return transcript
+                else:
+                    last_error = "Groq STT returned an empty transcript."
+        except urllib.error.HTTPError as e:
+            err_msg = e.read().decode("utf-8", errors="ignore")
+            logger.warning(f"Groq STT model {model_name} HTTP {e.code}: {err_msg}")
+            if e.code in (401, 403):
+                raise ValueError(f"Groq API authentication failed (HTTP {e.code}). Please check server GROQ_API_KEY configuration.")
+            elif e.code == 429:
+                last_error = "Groq API rate limit exceeded (HTTP 429). Please try again in a few moments."
+            else:
+                last_error = f"Groq STT HTTP {e.code}: {err_msg}"
+        except Exception as e:
+            logger.warning(f"Groq STT model {model_name} error: {e}")
+            last_error = str(e)
+
+    raise ValueError(f"Audio transcription failed: {last_error or 'Unable to process audio file.'}")
+
+
 def call_gemini_api_rest(prompt: str, user_api_key: Optional[str] = None) -> Optional[str]:
     """Call Google Gemini REST API with JSON response format."""
     raw_key = user_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or settings.GEMINI_API_KEY

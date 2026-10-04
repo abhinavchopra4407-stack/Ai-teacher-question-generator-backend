@@ -849,3 +849,57 @@ def delete_conversation(
     db.delete(conv)
     db.commit()
     return {"message": "Conversation deleted successfully."}
+
+# ================= VOICE TRANSCRIPTION ENDPOINT =================
+
+@app.post("/api/ai/voice/transcribe")
+@app.post("/api/voice/transcribe")
+async def transcribe_voice_audio(
+    file: Optional[UploadFile] = File(None),
+    language: Optional[str] = Form(None),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Transcribe recorded user speech using server-side Groq Whisper API.
+    Enforces authentication, file size limits (<= 10MB), non-empty payload, and allowed formats.
+    """
+    if not file:
+        raise HTTPException(status_code=400, detail="No audio recording file provided in request.")
+
+    file_bytes = await file.read()
+    if not file_bytes or len(file_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Empty audio recording payload received.")
+
+    if len(file_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Audio file size exceeds maximum limit of 10MB.")
+
+    filename = file.filename or "recording.webm"
+    valid_exts = ('.webm', '.wav', '.mp3', '.m4a', '.ogg', '.aac', '.mp4', '.flac')
+    file_mime = file.content_type or ""
+    
+    if not any(filename.lower().endswith(ext) for ext in valid_exts) and not any(m in file_mime for m in ["audio", "webm", "octet-stream"]):
+        raise HTTPException(status_code=400, detail="Unsupported audio format. Please send webm, wav, mp3, m4a, or ogg audio.")
+
+    try:
+        transcript = ai_engine.transcribe_audio_with_groq(
+            file_bytes=file_bytes,
+            filename=filename,
+            language=language,
+            user_api_key=current_user.custom_gemini_api_key
+        )
+        if not transcript or not transcript.strip():
+            raise HTTPException(status_code=422, detail="No speech could be recognized. Please speak clearly into the microphone and try again.")
+
+        return {"transcript": transcript.strip()}
+    except HTTPException:
+        raise
+    except ValueError as e:
+        err_msg = str(e)
+        if "authentication failed" in err_msg.lower() or "401" in err_msg:
+            raise HTTPException(status_code=401, detail="Groq API key authentication failed. Please verify server GROQ_API_KEY environment variable.")
+        elif "not configured" in err_msg.lower():
+            raise HTTPException(status_code=503, detail="Voice transcription service is not configured on the server.")
+        raise HTTPException(status_code=500, detail=err_msg)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Voice transcription service error: {str(e)}")
+
