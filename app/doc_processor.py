@@ -36,7 +36,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
                     line_occurrences[norm] = line_occurrences.get(norm, 0) + 1
                     
         cleaned_pages = []
-        for lines in page_lines_list:
+        for p_idx, lines in enumerate(page_lines_list):
             cleaned_page_lines = []
             for line in lines:
                 norm = re.sub(r'[\d\s•|\-\.]+$', '', line, flags=re.IGNORECASE).strip()
@@ -134,8 +134,8 @@ def clean_text(text: str) -> str:
     text = re.sub(r'(?<=[^\n.!?])\n+(?=[A-Z0-9])', '. ', text)
     # Remove lines ending with page numbers like "Story Title 1", "The Clockmaker of Riverton 2."
     text = re.sub(r'^[^\n]*?\b\d+\s*\.?\s*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^[^\n]+?\s*•?\s*Page\s*\d+.*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
-    text = re.sub(r'Page\s+\d+(\s+of\s+\d+)?', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^(?!\[Page\s*\d+\])[^\n]+?\s*•?\s*Page\s*\d+.*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
+    text = re.sub(r'(?<!\[)Page\s+\d+(\s+of\s+\d+)?(?!\])', '', text, flags=re.IGNORECASE)
     text = re.sub(r'Prepared as a sample document.*?\.', '', text, flags=re.IGNORECASE)
     text = re.sub(r'for testing PDF.*?\.', '', text, flags=re.IGNORECASE)
     text = re.sub(r'A ten-part short story.*?\.', '', text, flags=re.IGNORECASE)
