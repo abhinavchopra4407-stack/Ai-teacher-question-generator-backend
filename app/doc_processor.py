@@ -78,10 +78,11 @@ def process_uploaded_document(file: UploadFile, file_bytes: bytes) -> Tuple[str,
     return extracted_text, word_count
 
 def clean_text(text: str) -> str:
-    """Clean unneeded white spaces and control characters."""
+    """Clean unneeded white spaces, control characters, and PDF page numbers."""
     if not text:
         return ""
     text = re.sub(r'[\r\t]', ' ', text)
+    text = re.sub(r'Page\s+\d+(\s+of\s+\d+)?', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r' {2,}', ' ', text)
     return text.strip()

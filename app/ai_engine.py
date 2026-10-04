@@ -391,22 +391,36 @@ CHAPTER TEXT:
     }
 
 def extract_grounded_answer_from_text(question_text: str, topic: str, chapter_text: str, max_words: int = 80) -> str:
-    """Extract exact relevant sentences from chapter_text that match the question or topic keywords."""
+    """Extract exact relevant sentences from chapter_text that match the question or topic keywords, filtering out PDF metadata noise."""
     if not chapter_text or not chapter_text.strip():
         return f"Refer to the core concepts outlined in {topic}."
 
     cleaned = chapter_text.strip()
+    # Remove PDF page numbers and boilerplate header noise
+    cleaned = re.sub(r'Page\s+\d+(\s+of\s+\d+)?', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'Prepared as a sample document.*?\.', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'for testing PDF upload.*?\.', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'A ten-part short story for testing.*?\.', '', cleaned, flags=re.IGNORECASE)
+
     sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', cleaned) if len(s.strip()) > 15]
     
-    if not sentences:
-        return cleaned[:250] + "..." if len(cleaned) > 250 else cleaned
+    # Filter out sentences that still look like metadata/headers
+    filtered_sentences = []
+    for s in sentences:
+        s_lower = s.lower()
+        if any(bad in s_lower for bad in ["sample document", "testing pdf", "page 1", "page 2", "for project testing"]):
+            continue
+        filtered_sentences.append(s)
 
-    stop_words = {"what", "is", "the", "define", "key", "term", "presented", "in", "chapter", "how", "why", "explain", "of", "and", "a", "to", "or", "regarding", "as", "described", "text", "which", "state", "outline", "list", "compare", "contrast"}
+    if not filtered_sentences:
+        filtered_sentences = sentences or [cleaned]
+
+    stop_words = {"what", "is", "the", "define", "key", "term", "presented", "in", "chapter", "how", "why", "explain", "of", "and", "a", "to", "or", "regarding", "as", "described", "text", "which", "state", "outline", "list", "compare", "contrast", "page", "short", "story"}
     words = re.findall(r'\w+', (question_text + " " + topic).lower())
     keywords = [w for w in words if len(w) > 3 and w not in stop_words]
 
     scored_sentences = []
-    for s in sentences:
+    for s in filtered_sentences:
         s_lower = s.lower()
         score = sum(1 for kw in keywords if kw in s_lower)
         scored_sentences.append((score, s))
@@ -417,7 +431,7 @@ def extract_grounded_answer_from_text(question_text: str, topic: str, chapter_te
     if best_matches:
         answer_text = " ".join(best_matches[:2])
     else:
-        answer_text = " ".join(sentences[:2])
+        answer_text = " ".join(filtered_sentences[:2])
 
     words_list = answer_text.split()
     if len(words_list) > max_words:
