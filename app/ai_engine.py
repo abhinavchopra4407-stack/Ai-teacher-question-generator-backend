@@ -390,6 +390,40 @@ CHAPTER TEXT:
         "expected_length": "1-10 words" if "Very Short" in question_type else ("40-60 words" if "Short" in question_type else "150-250 words")
     }
 
+def extract_grounded_answer_from_text(question_text: str, topic: str, chapter_text: str, max_words: int = 80) -> str:
+    """Extract exact relevant sentences from chapter_text that match the question or topic keywords."""
+    if not chapter_text or not chapter_text.strip():
+        return f"Refer to the core concepts outlined in {topic}."
+
+    cleaned = chapter_text.strip()
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', cleaned) if len(s.strip()) > 15]
+    
+    if not sentences:
+        return cleaned[:250] + "..." if len(cleaned) > 250 else cleaned
+
+    stop_words = {"what", "is", "the", "define", "key", "term", "presented", "in", "chapter", "how", "why", "explain", "of", "and", "a", "to", "or", "regarding", "as", "described", "text", "which", "state", "outline", "list", "compare", "contrast"}
+    words = re.findall(r'\w+', (question_text + " " + topic).lower())
+    keywords = [w for w in words if len(w) > 3 and w not in stop_words]
+
+    scored_sentences = []
+    for s in sentences:
+        s_lower = s.lower()
+        score = sum(1 for kw in keywords if kw in s_lower)
+        scored_sentences.append((score, s))
+
+    scored_sentences.sort(key=lambda x: x[0], reverse=True)
+    best_matches = [s for score, s in scored_sentences if score > 0]
+    
+    if best_matches:
+        answer_text = " ".join(best_matches[:2])
+    else:
+        answer_text = " ".join(sentences[:2])
+
+    words_list = answer_text.split()
+    if len(words_list) > max_words:
+        return " ".join(words_list[:max_words]) + "..."
+    return answer_text
+
 def generate_answer_key_for_questions(
     chapter_title: str,
     chapter_text: str,
@@ -486,22 +520,24 @@ OUTPUT FORMAT: Return ONLY a JSON object with a single top-level key "answer_key
         except Exception as e:
             logger.error(f"Gemini answer key error: {e}")
 
-    # 3. Grounded Specific Fallback Answers
+    # 3. Grounded Specific Fallback Answers from Chapter Text
     for q in questions:
         q_type = q.get("question_type", "")
         q_text = q.get("question_text", "")
         topic = q.get("related_topic", chapter_title)
         
+        extracted_ans = extract_grounded_answer_from_text(q_text, topic, chapter_text, max_words=80)
+        
         if "Very Short" in q_type:
-            q["answer"] = f"In '{chapter_title}', {topic} refers to the core concept defined in the chapter text as a fundamental component of the subject."
+            q["answer"] = extracted_ans
             q["expected_length"] = "1 - 10 words"
             q["marking_points"] = ["Correct definition/term identification (Full Marks)"]
         elif "Short" in q_type:
-            q["answer"] = f"The role of {topic} in '{chapter_title}' is significant as it provides key operational mechanism and functional principles essential to understanding the main subject matter."
+            q["answer"] = extracted_ans
             q["expected_length"] = "40 - 60 words"
             q["marking_points"] = ["Identification of primary concept (2 marks)", "Key explanation & illustration (2 marks)"]
         else:
-            q["answer"] = f"A comprehensive analysis of {topic} in '{chapter_title}' demonstrates its theoretical foundation, structural components, and practical applications as detailed throughout the chapter sections."
+            q["answer"] = extracted_ans
             q["expected_length"] = "150 - 250 words"
             q["marking_points"] = [
                 "Introduction and core definition (2 marks)",
