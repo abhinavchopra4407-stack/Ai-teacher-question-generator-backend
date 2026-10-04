@@ -13,7 +13,8 @@ logger = logging.getLogger("ai_engine")
 
 def call_groq_api(prompt: str, user_api_key: Optional[str] = None) -> Optional[str]:
     """Call Groq API or xAI Grok API using configured credentials."""
-    api_key = user_api_key or os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY") or settings.GROQ_API_KEY
+    raw_key = user_api_key or os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY") or settings.GROQ_API_KEY
+    api_key = clean_api_key(raw_key)
     if not api_key:
         logger.info("No Groq / Grok / xAI API key configured.")
         return None
@@ -23,7 +24,7 @@ def call_groq_api(prompt: str, user_api_key: Optional[str] = None) -> Optional[s
         models_to_try = ["grok-2-latest", "grok-beta", "grok-2-1212"]
     else:
         url = "https://api.groq.com/openai/v1/chat/completions"
-        models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+        models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama3-70b-8192"]
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -59,7 +60,8 @@ def call_groq_api(prompt: str, user_api_key: Optional[str] = None) -> Optional[s
 
 def call_gemini_api_rest(prompt: str, user_api_key: Optional[str] = None) -> Optional[str]:
     """Call Google Gemini REST API with JSON response format."""
-    api_key = user_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or settings.GEMINI_API_KEY
+    raw_key = user_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or settings.GEMINI_API_KEY
+    api_key = clean_api_key(raw_key)
     if not api_key:
         return None
 
@@ -852,6 +854,20 @@ SYSTEM_CHAT_PROMPT = (
     "- Answer in the user's requested language (English, Hindi, Hinglish, etc.)."
 )
 
+def clean_api_key(raw_key: Optional[str]) -> Optional[str]:
+    """Clean and validate API key string, filtering out placeholders and empty strings."""
+    if not raw_key:
+        return None
+    cleaned = raw_key.strip().strip('"').strip("'")
+    placeholders = {
+        "", "none", "null", "undefined",
+        "your_gemini_api_key", "your_groq_api_key", "your_api_key_here",
+        "insert_key_here", "your_grok_api_key", "your_xai_api_key"
+    }
+    if cleaned.lower() in placeholders:
+        return None
+    return cleaned
+
 def format_gemini_contents(messages: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     """Format chat messages to satisfy Gemini API requirement of alternating user/model roles."""
     contents = []
@@ -868,20 +884,41 @@ def format_gemini_contents(messages: List[Dict[str, str]]) -> List[Dict[str, Any
 
 def generate_chat_response(messages: List[Dict[str, str]], user_api_key: Optional[str] = None) -> str:
     """
-    Generate a real LLM AI response for multi-turn chat conversations using Groq, Gemini, or OpenAI.
+    Generate a real LLM AI response for multi-turn chat conversations using Groq, Gemini, or OpenAI with fallback & diagnostic logging.
     """
     if not messages:
         raise ValueError("No message history provided for chat generation.")
 
+    custom_key = clean_api_key(user_api_key)
+    
+    # Resolve Groq/xAI Key
+    groq_key = (custom_key if (custom_key and custom_key.startswith("gsk_")) else None) or \
+               clean_api_key(os.getenv("GROQ_API_KEY")) or \
+               clean_api_key(os.getenv("GROK_API_KEY")) or \
+               clean_api_key(os.getenv("XAI_API_KEY")) or \
+               clean_api_key(getattr(settings, "GROQ_API_KEY", None))
+
+    # Resolve Gemini Key
+    gemini_key = (custom_key if (custom_key and (custom_key.startswith("AIza") or not custom_key.startswith("gsk_"))) else None) or \
+                 clean_api_key(os.getenv("GEMINI_API_KEY")) or \
+                 clean_api_key(os.getenv("GOOGLE_API_KEY")) or \
+                 clean_api_key(getattr(settings, "GEMINI_API_KEY", None))
+
+    # Resolve OpenAI Key
+    openai_key = clean_api_key(os.getenv("OPENAI_API_KEY"))
+
+    logger.info(f"AI Provider Key Status: Groq Key Present={bool(groq_key)}, Gemini Key Present={bool(gemini_key)}, OpenAI Key Present={bool(openai_key)}")
+
+    diagnostics = []
+
     # 1. Try Groq / xAI API Provider
-    groq_key = user_api_key or os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY") or settings.GROQ_API_KEY
     if groq_key:
         if groq_key.startswith("xai-"):
             url = "https://api.x.ai/v1/chat/completions"
             models = ["grok-2-latest", "grok-beta"]
         else:
             url = "https://api.groq.com/openai/v1/chat/completions"
-            models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+            models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama3-70b-8192", "mixtral-8x7b-32768"]
 
         groq_messages = [{"role": m["role"], "content": m["content"]} for m in messages if m.get("content")]
         if not any(m["role"] == "system" for m in groq_messages):
@@ -903,14 +940,18 @@ def generate_chat_response(messages: List[Dict[str, str]], user_api_key: Optiona
                     res_body = json.loads(response.read().decode("utf-8"))
                     content = res_body["choices"][0]["message"]["content"]
                     if content and content.strip():
-                        logger.info(f"Chat response generated successfully via Groq/xAI model: {model_name}")
+                        logger.info(f"Chat response generated successfully via Groq model: {model_name}")
                         return content.strip()
+            except urllib.error.HTTPError as e:
+                err_msg = f"Groq API model {model_name} HTTP {e.code}: {e.reason}"
+                logger.warning(err_msg)
+                diagnostics.append(err_msg)
             except Exception as e:
-                logger.warning(f"Chat Groq/xAI model {model_name} error: {e}")
-                continue
+                err_msg = f"Groq API model {model_name} error: {str(e)}"
+                logger.warning(err_msg)
+                diagnostics.append(err_msg)
 
     # 2. Try Gemini REST API Provider
-    gemini_key = user_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or settings.GEMINI_API_KEY
     if gemini_key:
         models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
         contents = format_gemini_contents(messages)
@@ -918,7 +959,9 @@ def generate_chat_response(messages: List[Dict[str, str]], user_api_key: Optiona
         for model_name in models:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_key}"
             headers = {"Content-Type": "application/json"}
-            data = {
+            
+            # Payload Attempt A: System Instruction
+            data_sys = {
                 "system_instruction": {
                     "parts": [{"text": SYSTEM_CHAT_PROMPT}]
                 },
@@ -928,7 +971,7 @@ def generate_chat_response(messages: List[Dict[str, str]], user_api_key: Optiona
                 }
             }
             try:
-                req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers)
+                req = urllib.request.Request(url, data=json.dumps(data_sys).encode("utf-8"), headers=headers)
                 with urllib.request.urlopen(req, timeout=35) as response:
                     res_body = json.loads(response.read().decode("utf-8"))
                     candidates = res_body.get("candidates", [])
@@ -939,28 +982,99 @@ def generate_chat_response(messages: List[Dict[str, str]], user_api_key: Optiona
                             if text and text.strip():
                                 logger.info(f"Chat response generated successfully via Gemini REST model: {model_name}")
                                 return text.strip()
+            except urllib.error.HTTPError as e:
+                err_msg = f"Gemini REST model {model_name} HTTP {e.code}: {e.reason}"
+                logger.warning(err_msg)
+                diagnostics.append(err_msg)
             except Exception as e:
-                logger.warning(f"Chat Gemini REST model {model_name} error: {e}")
-                continue
+                err_msg = f"Gemini REST model {model_name} error: {str(e)}"
+                logger.warning(err_msg)
+                diagnostics.append(err_msg)
+
+            # Payload Attempt B: Prepend System Instruction to contents
+            contents_with_sys = list(contents)
+            if contents_with_sys and contents_with_sys[0]["role"] == "user":
+                orig_text = contents_with_sys[0]["parts"][0]["text"]
+                contents_with_sys[0] = {
+                    "role": "user",
+                    "parts": [{"text": f"System Instructions: {SYSTEM_CHAT_PROMPT}\n\nUser Request: {orig_text}"}]
+                }
+            
+            data_plain = {
+                "contents": contents_with_sys,
+                "generationConfig": {
+                    "temperature": 0.3
+                }
+            }
+            try:
+                req = urllib.request.Request(url, data=json.dumps(data_plain).encode("utf-8"), headers=headers)
+                with urllib.request.urlopen(req, timeout=35) as response:
+                    res_body = json.loads(response.read().decode("utf-8"))
+                    candidates = res_body.get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        if parts and "text" in parts[0]:
+                            text = parts[0]["text"]
+                            if text and text.strip():
+                                logger.info(f"Chat response generated successfully via Gemini REST fallback model: {model_name}")
+                                return text.strip()
+            except Exception as e:
+                logger.warning(f"Gemini REST plain fallback model {model_name} error: {e}")
 
     # 3. Try Gemini SDK Client Provider
-    client = get_gemini_client(user_api_key)
-    if client:
-        try:
-            last_msg = messages[-1]["content"] if messages else ""
-            if hasattr(client, "models"):
-                res = client.models.generate_content(model='gemini-2.0-flash', contents=last_msg)
-                if res and res.text and res.text.strip():
-                    return res.text.strip()
-            elif hasattr(client, "GenerativeModel"):
-                res = client.GenerativeModel("gemini-1.5-flash").generate_content(last_msg)
-                if res and res.text and res.text.strip():
-                    return res.text.strip()
-        except Exception as e:
-            logger.error(f"Chat Gemini SDK error: {e}")
+    if gemini_key:
+        client = get_gemini_client(gemini_key)
+        if client:
+            try:
+                last_msg = messages[-1]["content"] if messages else ""
+                if hasattr(client, "models"):
+                    res = client.models.generate_content(model='gemini-2.0-flash', contents=last_msg)
+                    if res and res.text and res.text.strip():
+                        return res.text.strip()
+                elif hasattr(client, "GenerativeModel"):
+                    res = client.GenerativeModel("gemini-1.5-flash").generate_content(last_msg)
+                    if res and res.text and res.text.strip():
+                        return res.text.strip()
+            except Exception as e:
+                err_msg = f"Gemini SDK client error: {str(e)}"
+                logger.warning(err_msg)
+                diagnostics.append(err_msg)
 
-    # No fake hardcoded fallback. Raise clear error so frontend displays helpful error message.
+    # 4. Try OpenAI API Provider Fallback
+    if openai_key:
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {openai_key}",
+            "Content-Type": "application/json"
+        }
+        openai_messages = [{"role": m["role"], "content": m["content"]} for m in messages if m.get("content")]
+        if not any(m["role"] == "system" for m in openai_messages):
+            openai_messages.insert(0, {"role": "system", "content": SYSTEM_CHAT_PROMPT})
+
+        for model_name in ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]:
+            data = {"model": model_name, "messages": openai_messages, "temperature": 0.3}
+            try:
+                req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers)
+                with urllib.request.urlopen(req, timeout=35) as response:
+                    res_body = json.loads(response.read().decode("utf-8"))
+                    content = res_body["choices"][0]["message"]["content"]
+                    if content and content.strip():
+                        logger.info(f"Chat response generated successfully via OpenAI model: {model_name}")
+                        return content.strip()
+            except Exception as e:
+                err_msg = f"OpenAI API model {model_name} error: {str(e)}"
+                logger.warning(err_msg)
+                diagnostics.append(err_msg)
+
+    # Construct actionable diagnostic error message
+    if not (groq_key or gemini_key or openai_key):
+        raise ValueError(
+            "AI Assistant provider is currently unavailable: No valid GEMINI_API_KEY or GROQ_API_KEY found in server environment variables. "
+            "Please configure GEMINI_API_KEY or GROQ_API_KEY in your Render dashboard environment settings."
+        )
+
+    diag_summary = "; ".join(diagnostics[:3]) if diagnostics else "Upstream API calls timed out or rejected request."
     raise ValueError(
-        "AI Assistant provider is currently unavailable. "
-        "Please ensure a valid GEMINI_API_KEY or GROQ_API_KEY is configured in server environment variables or account settings."
+        f"AI Assistant provider failed to generate response. Provider diagnostics: {diag_summary}. "
+        "Please check your GEMINI_API_KEY or GROQ_API_KEY quota and validity."
     )
