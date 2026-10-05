@@ -36,6 +36,23 @@ class Document(Base):
     
     owner = relationship("User", back_populates="documents")
     question_papers = relationship("QuestionPaper", back_populates="document")
+    chapters = relationship("Chapter", back_populates="document", cascade="all, delete-orphan", order_by="Chapter.chapter_number")
+
+class Chapter(Base):
+    __tablename__ = "chapters"
+    
+    id = Column(String, primary_key=True, default=generate_uuid)
+    document_id = Column(String, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    chapter_number = Column(Integer, nullable=False, default=1)
+    title = Column(String, nullable=False)
+    start_page = Column(Integer, nullable=False, default=1)
+    end_page = Column(Integer, nullable=False, default=1)
+    extracted_text = Column(Text, nullable=False)
+    word_count = Column(Integer, default=0)
+    detection_confidence = Column(String, default="high")  # 'high', 'medium', 'low'
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    
+    document = relationship("Document", back_populates="chapters")
 
 class QuestionPaper(Base):
     __tablename__ = "question_papers"

@@ -42,12 +42,28 @@ class Token(BaseModel):
     user: UserOut
 
 # --- Chapter / Document Input Schemas ---
+class ChapterOut(BaseModel):
+    id: str
+    document_id: str
+    chapter_number: int
+    title: str
+    start_page: int
+    end_page: int
+    word_count: int
+    detection_confidence: str = "high"
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
 class TextExtractResponse(BaseModel):
     extracted_text: str
     word_count: int
     file_name: Optional[str] = None
     file_type: Optional[str] = None
     document_id: Optional[str] = None
+    chapters: Optional[List[ChapterOut]] = []
+    overall_confidence: Optional[str] = "high"
 
 # --- Question Schemas ---
 class SectionConfig(BaseModel):
@@ -70,12 +86,18 @@ class SingleQuestion(BaseModel):
     related_topic: str
     section_name: Optional[str] = None
     source_pages: Optional[List[int]] = []
+    source_chapter: Optional[str] = None
+    source_page: Optional[int] = None
+    source_chunk: Optional[str] = None
     answer: Optional[str] = None
     marking_points: Optional[List[str]] = []
     expected_length: Optional[str] = None
 
 class GenerateQuestionsRequest(BaseModel):
     document_id: Optional[str] = None
+    chapter_id: Optional[str] = None
+    start_page: Optional[int] = None
+    end_page: Optional[int] = None
     chapter_title: str
     subject: str
     grade: str

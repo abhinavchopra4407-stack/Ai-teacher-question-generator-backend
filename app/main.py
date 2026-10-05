@@ -218,6 +218,8 @@ async def upload_document(
     extracted_text = ""
     file_name = None
     file_type = "raw_text"
+    detected_chapters = []
+    overall_confidence = "high"
     
     if file:
         file_bytes = await file.read()
@@ -226,11 +228,20 @@ async def upload_document(
             
         file_name = file.filename
         file_type = file.filename.split(".")[-1] if "." in file.filename else "unknown"
-        extracted_text, word_count = doc_processor.process_uploaded_document(file, file_bytes)
+        extracted_text, word_count, detected_chapters, overall_confidence = doc_processor.process_uploaded_document(file, file_bytes)
     elif raw_text and raw_text.strip():
         extracted_text = doc_processor.clean_text(raw_text)
         word_count = len(extracted_text.split())
         file_name = "Pasted Chapter Content"
+        detected_chapters = [{
+            "chapter_number": 1,
+            "title": "Pasted Content",
+            "start_page": 1,
+            "end_page": 1,
+            "extracted_text": extracted_text,
+            "word_count": word_count,
+            "detection_confidence": "high"
+        }]
     else:
         raise HTTPException(status_code=400, detail="Please upload a PDF/DOCX file or paste chapter content text.")
         
@@ -248,13 +259,73 @@ async def upload_document(
     db.commit()
     db.refresh(doc_record)
     
+    # Store detected chapters in DB
+    for c_data in detected_chapters:
+        ch = models.Chapter(
+            document_id=doc_record.id,
+            chapter_number=c_data["chapter_number"],
+            title=c_data["title"],
+            start_page=c_data["start_page"],
+            end_page=c_data["end_page"],
+            extracted_text=c_data["extracted_text"],
+            word_count=c_data.get("word_count", len(c_data["extracted_text"].split())),
+            detection_confidence=c_data.get("detection_confidence", "high")
+        )
+        db.add(ch)
+    db.commit()
+    db.refresh(doc_record)
+    
+    chapters_out = [
+        schemas.ChapterOut(
+            id=ch.id,
+            document_id=ch.document_id,
+            chapter_number=ch.chapter_number,
+            title=ch.title,
+            start_page=ch.start_page,
+            end_page=ch.end_page,
+            extracted_text=ch.extracted_text,
+            word_count=ch.word_count,
+            detection_confidence=ch.detection_confidence,
+            created_at=ch.created_at
+        ) for ch in doc_record.chapters
+    ]
+    
     return {
         "extracted_text": extracted_text,
         "word_count": word_count,
         "file_name": file_name,
         "file_type": file_type,
-        "document_id": doc_record.id
+        "document_id": doc_record.id,
+        "chapters": chapters_out,
+        "overall_confidence": overall_confidence
     }
+
+@app.get("/api/documents/{document_id}/chapters", response_model=List[schemas.ChapterOut])
+def get_document_chapters(
+    document_id: str,
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db)
+):
+    doc = db.query(models.Document).filter(
+        models.Document.id == document_id,
+        models.Document.user_id == current_user.id
+    ).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found or access denied.")
+    return [
+        schemas.ChapterOut(
+            id=ch.id,
+            document_id=ch.document_id,
+            chapter_number=ch.chapter_number,
+            title=ch.title,
+            start_page=ch.start_page,
+            end_page=ch.end_page,
+            extracted_text=ch.extracted_text,
+            word_count=ch.word_count,
+            detection_confidence=ch.detection_confidence,
+            created_at=ch.created_at
+        ) for ch in doc.chapters
+    ]
 
 # ================= AI QUESTION GENERATION ENDPOINTS =================
 
@@ -266,22 +337,54 @@ def generate_questions(
 ):
     try:
         chapter_text = ""
+        chapter_title = req.chapter_title
         
-        if req.document_id:
+        # Priority 1: Selected Chapter ID (Strict Chapter Isolation)
+        if req.chapter_id:
+            chapter_obj = db.query(models.Chapter).join(models.Document).filter(
+                models.Chapter.id == req.chapter_id,
+                models.Document.user_id == current_user.id
+            ).first()
+            if not chapter_obj:
+                raise HTTPException(status_code=404, detail="Selected chapter was not found or access is denied.")
+            
+            # STRICT REQUIREMENT #4: Retrieve ONLY selected chapter content
+            chapter_text = chapter_obj.extracted_text
+            if not chapter_title or chapter_title == "Auto-detected Chapter":
+                chapter_title = f"{chapter_obj.title}"
+                
+        # Priority 2: Document ID + Optional Manual Page Range Fallback
+        elif req.document_id:
             doc = db.query(models.Document).filter(
                 models.Document.id == req.document_id,
                 models.Document.user_id == current_user.id
             ).first()
             if not doc:
                 raise HTTPException(status_code=404, detail="Document not found or access denied.")
-            chapter_text = doc.extracted_text
+                
+            if req.start_page is not None and req.end_page is not None:
+                if req.start_page > req.end_page:
+                    raise HTTPException(status_code=400, detail="Start page cannot be greater than end page.")
+                chapter_text = doc_processor.extract_page_range_text(doc.extracted_text, req.start_page, req.end_page)
+                if not chapter_title:
+                    chapter_title = f"Pages {req.start_page}-{req.end_page}"
+            else:
+                # All Chapters mode
+                chapter_text = doc.extracted_text
+                if not chapter_title:
+                    chapter_title = doc.title
+                    
+        # Priority 3: Raw pasted content
         elif req.raw_content and req.raw_content.strip():
             chapter_text = doc_processor.clean_text(req.raw_content)
         else:
-            raise HTTPException(status_code=400, detail="Please provide either a document_id or raw chapter content.")
+            raise HTTPException(status_code=400, detail="Please select a chapter, document, or provide raw content.")
             
         if not chapter_text or len(chapter_text.strip()) < 20:
-            raise HTTPException(status_code=400, detail="Chapter content is empty or contains insufficient text.")
+            raise HTTPException(status_code=400, detail="Selected chapter content is empty or contains insufficient text.")
+
+        # Chunk large chapter safely if needed (Requirement #6)
+        chapter_text = doc_processor.chunk_text_if_needed(chapter_text, max_words=4000)
 
         sec_dicts = [s.dict() for s in req.sections] if req.sections else None
         if sec_dicts:
@@ -295,7 +398,7 @@ def generate_questions(
                 raise HTTPException(status_code=400, detail="Question count for enabled sections must be at least 1.")
 
         generated_data = ai_engine.generate_questions_from_chapter(
-            chapter_title=req.chapter_title,
+            chapter_title=chapter_title,
             chapter_text=chapter_text,
             subject=req.subject,
             grade=req.grade,
@@ -316,7 +419,7 @@ def generate_questions(
         total_marks = sum(q.get("marks", 2) for q in all_q)
         
         return {
-            "chapter_title": req.chapter_title,
+            "chapter_title": chapter_title,
             "subject": req.subject,
             "grade": req.grade,
             "board": req.board or "General",

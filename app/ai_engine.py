@@ -327,6 +327,58 @@ def parse_and_validate_ai_response(
     chapter_title: str,
     chapter_text: str
 ) -> Optional[Dict[str, Any]]:
+def attach_source_attributions_to_questions(questions: List[Dict[str, Any]], chapter_title: str, chapter_text: str):
+    """
+    Scans chapter_text for page tags [Page X] and matches question keywords 
+    to assign source_chapter, source_page, source_chunk, and source_pages.
+    """
+    page_snippets = []
+    page_blocks = re.split(r'\[Page\s+(\d+)\]', chapter_text, flags=re.IGNORECASE)
+    
+    if len(page_blocks) >= 3:
+        for i in range(1, len(page_blocks), 2):
+            try:
+                p_num = int(page_blocks[i])
+                p_text = page_blocks[i+1].strip() if i+1 < len(page_blocks) else ""
+                page_snippets.append({"page": p_num, "text": p_text})
+            except ValueError:
+                continue
+    
+    if not page_snippets:
+        page_snippets = [{"page": 1, "text": chapter_text}]
+
+    stop_words = {"what", "is", "the", "define", "key", "term", "presented", "in", "chapter", "how", "why", "explain", "of", "and", "a", "to", "or", "regarding", "as", "described", "text", "which", "state", "outline", "list"}
+
+    for q in questions:
+        q_text = q.get("question_text", "").strip()
+        ans_text = q.get("answer", "").strip()
+        combined = (q_text + " " + ans_text).lower()
+        keywords = [w for w in re.findall(r'\w+', combined) if len(w) > 3 and w not in stop_words]
+
+        best_page = page_snippets[0]["page"]
+        best_score = -1
+        best_chunk = page_snippets[0]["text"][:180]
+
+        for p_item in page_snippets:
+            p_lower = p_item["text"].lower()
+            score = sum(1 for kw in keywords if kw in p_lower)
+            if score > best_score:
+                best_score = score
+                best_page = p_item["page"]
+                lines = [l.strip() for l in p_item["text"].splitlines() if len(l.strip()) > 20]
+                best_chunk = lines[0][:180] if lines else p_item["text"][:180]
+
+        q["source_chapter"] = chapter_title
+        q["source_page"] = best_page
+        q["source_chunk"] = best_chunk if best_chunk else f"{chapter_title} content"
+        q["source_pages"] = [best_page]
+
+def parse_and_validate_ai_response(
+    raw_res: str,
+    active_sections: List[Dict[str, Any]],
+    chapter_title: str,
+    chapter_text: str
+) -> Optional[Dict[str, Any]]:
     """Parse raw AI JSON output and group questions into requested active sections."""
     try:
         parsed = extract_json_from_text(raw_res)
@@ -396,7 +448,6 @@ def parse_and_validate_ai_response(
         marks = sec["marks_per_question"]
         expected_len = sec.get("expected_length", "Standard")
 
-        # Find matching questions for this section
         matched = []
         remaining_pool = []
         for q in unassigned_pool:
@@ -409,11 +460,9 @@ def parse_and_validate_ai_response(
                 
         unassigned_pool = remaining_pool
 
-        # If matching couldn't satisfy count, take from unassigned pool
         while len(matched) < req_count and unassigned_pool:
             matched.append(unassigned_pool.pop(0))
 
-        # Assign section attributes to matched questions
         for q in matched[:req_count]:
             q["question_number"] = global_num
             q["section_name"] = sec_name
@@ -437,6 +486,9 @@ def parse_and_validate_ai_response(
     if len(all_final_questions) < total_expected:
         logger.warning(f"Parsed {len(all_final_questions)} questions, but {total_expected} were requested.")
         return None
+
+    # Attach source attributions (source_chapter, source_page, source_chunk)
+    attach_source_attributions_to_questions(all_final_questions, chapter_title, chapter_text)
 
     return {
         "very_short_questions": vs_list,
@@ -937,6 +989,8 @@ def generate_fallback_questions(
                 lq_list.append(q_obj)
 
             global_q_num += 1
+
+    attach_source_attributions_to_questions(all_questions, chapter_title, chapter_text)
 
     return {
         "very_short_questions": vs_list,
