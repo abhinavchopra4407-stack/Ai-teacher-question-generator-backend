@@ -321,12 +321,7 @@ def normalize_sections_config(sections: Optional[List[Dict[str, Any]]]) -> List[
         ]
     return active
 
-def parse_and_validate_ai_response(
-    raw_res: str,
-    active_sections: List[Dict[str, Any]],
-    chapter_title: str,
-    chapter_text: str
-) -> Optional[Dict[str, Any]]:
+
 def attach_source_attributions_to_questions(questions: List[Dict[str, Any]], chapter_title: str, chapter_text: str):
     """
     Scans chapter_text for page tags [Page X] and matches question keywords 
