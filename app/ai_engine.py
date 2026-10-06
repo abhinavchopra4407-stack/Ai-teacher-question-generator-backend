@@ -321,58 +321,12 @@ def normalize_sections_config(sections: Optional[List[Dict[str, Any]]]) -> List[
         ]
     return active
 
-
-def attach_source_attributions_to_questions(questions: List[Dict[str, Any]], chapter_title: str, chapter_text: str):
-    """
-    Scans chapter_text for page tags [Page X] and matches question keywords 
-    to assign source_chapter, source_page, source_chunk, and source_pages.
-    """
-    page_snippets = []
-    page_blocks = re.split(r'\[Page\s+(\d+)\]', chapter_text, flags=re.IGNORECASE)
-    
-    if len(page_blocks) >= 3:
-        for i in range(1, len(page_blocks), 2):
-            try:
-                p_num = int(page_blocks[i])
-                p_text = page_blocks[i+1].strip() if i+1 < len(page_blocks) else ""
-                page_snippets.append({"page": p_num, "text": p_text})
-            except ValueError:
-                continue
-    
-    if not page_snippets:
-        page_snippets = [{"page": 1, "text": chapter_text}]
-
-    stop_words = {"what", "is", "the", "define", "key", "term", "presented", "in", "chapter", "how", "why", "explain", "of", "and", "a", "to", "or", "regarding", "as", "described", "text", "which", "state", "outline", "list"}
-
-    for q in questions:
-        q_text = q.get("question_text", "").strip()
-        ans_text = q.get("answer", "").strip()
-        combined = (q_text + " " + ans_text).lower()
-        keywords = [w for w in re.findall(r'\w+', combined) if len(w) > 3 and w not in stop_words]
-
-        best_page = page_snippets[0]["page"]
-        best_score = -1
-        best_chunk = page_snippets[0]["text"][:180]
-
-        for p_item in page_snippets:
-            p_lower = p_item["text"].lower()
-            score = sum(1 for kw in keywords if kw in p_lower)
-            if score > best_score:
-                best_score = score
-                best_page = p_item["page"]
-                lines = [l.strip() for l in p_item["text"].splitlines() if len(l.strip()) > 20]
-                best_chunk = lines[0][:180] if lines else p_item["text"][:180]
-
-        q["source_chapter"] = chapter_title
-        q["source_page"] = best_page
-        q["source_chunk"] = best_chunk if best_chunk else f"{chapter_title} content"
-        q["source_pages"] = [best_page]
-
 def parse_and_validate_ai_response(
     raw_res: str,
     active_sections: List[Dict[str, Any]],
     chapter_title: str,
-    chapter_text: str
+    chapter_text: str,
+    subject: str = ""
 ) -> Optional[Dict[str, Any]]:
     """Parse raw AI JSON output and group questions into requested active sections."""
     try:
@@ -410,6 +364,9 @@ def parse_and_validate_ai_response(
         q_text = q.get("question_text", "").strip()
         if not q_text or len(q_text) < 8 or q_text.lower() in seen_texts:
             continue
+        if is_mathematics_subject(subject, chapter_title) and not math_question_is_numerical(q_text):
+            logger.warning("Rejected theory-only Mathematics question: %s", q_text[:120])
+            continue
         seen_texts.add(q_text.lower())
         
         topic = q.get("related_topic", "").strip()
@@ -443,6 +400,7 @@ def parse_and_validate_ai_response(
         marks = sec["marks_per_question"]
         expected_len = sec.get("expected_length", "Standard")
 
+        # Find matching questions for this section
         matched = []
         remaining_pool = []
         for q in unassigned_pool:
@@ -455,9 +413,11 @@ def parse_and_validate_ai_response(
                 
         unassigned_pool = remaining_pool
 
+        # If matching couldn't satisfy count, take from unassigned pool
         while len(matched) < req_count and unassigned_pool:
             matched.append(unassigned_pool.pop(0))
 
+        # Assign section attributes to matched questions
         for q in matched[:req_count]:
             q["question_number"] = global_num
             q["section_name"] = sec_name
@@ -482,9 +442,6 @@ def parse_and_validate_ai_response(
         logger.warning(f"Parsed {len(all_final_questions)} questions, but {total_expected} were requested.")
         return None
 
-    # Attach source attributions (source_chapter, source_page, source_chunk)
-    attach_source_attributions_to_questions(all_final_questions, chapter_title, chapter_text)
-
     return {
         "very_short_questions": vs_list,
         "short_questions": sq_list,
@@ -492,6 +449,55 @@ def parse_and_validate_ai_response(
         "all_questions": all_final_questions,
         "sections": active_sections
     }
+
+def is_mathematics_subject(subject: str, chapter_title: str = "") -> bool:
+    """Return True for mathematics/numerical subjects and common math labels."""
+    value = f"{subject or ''} {chapter_title or ''}".lower()
+    math_terms = (
+        "mathematics", "maths", "math", "algebra", "geometry", "trigonometry",
+        "calculus", "statistics", "probability", "arithmetic", "coordinate geometry",
+        "mensuration", "number system", "quadratic", "linear equation", "polynomial"
+    )
+    return any(term in value for term in math_terms)
+
+
+def build_math_instructions(grade: str, difficulty: str) -> str:
+    """Strong subject-specific constraints for numerical mathematics papers."""
+    return f"""
+MATHEMATICS MODE — THIS IS A NUMERICAL QUESTION PAPER.
+- Create a real {grade} Mathematics examination paper, not a theory/reading-comprehension paper.
+- Questions must primarily require the student to CALCULATE, SOLVE, EVALUATE, SIMPLIFY, FIND, DETERMINE, CONSTRUCT, or APPLY a mathematical method.
+- Do NOT create generic theory questions such as 'Explain the importance of...', 'What is...', 'Describe...', 'Discuss...', or history/background questions unless the question also requires an actual mathematical calculation.
+- Use the formulas, definitions, worked examples, values, equations, diagrams described in the supplied chapter content.
+- When the chapter contains formulas, variables, numerical examples, ratios, measurements, equations, graphs, or geometry data, use them actively in the questions.
+- Every numerical question must contain enough given information to be solvable without guessing missing values.
+- Prefer multi-step calculations for higher-mark questions and shorter calculations for lower-mark questions.
+- For geometry/trigonometry, provide the required side lengths/angles/data and ask the student to calculate the requested quantity.
+- For algebra, create solvable equations/expressions and ask for the value, roots, simplification, factorisation, etc.
+- For statistics/probability, include a concrete data set, table, frequency, or numerical values and ask for the required calculation.
+- For word problems, include realistic numerical values and require a mathematical solution.
+- Do not simply copy an example from the chapter. Create a new but conceptually equivalent problem using the same methods.
+- The answer MUST show the calculation steps, formula used (where applicable), substitutions, and final answer. Do not give only a prose explanation.
+- Marking points must award marks for mathematical method/working and the final answer.
+- Difficulty: {difficulty}. Keep calculations appropriate for the selected grade and difficulty.
+"""
+
+
+def math_question_is_numerical(question_text: str) -> bool:
+    """Reject obvious theory-only questions from Mathematics model output."""
+    q = (question_text or "").strip().lower()
+    if not q:
+        return False
+    numerical_verbs = ("calculate", "solve", "evaluate", "find", "determine", "simplify", "factorise", "factorize", "compute", "convert", "construct", "calculate the", "find the")
+    has_number = bool(re.search(r"\d", q))
+    has_math_symbol = bool(re.search(r"[=+×÷*/^√%<>≤≥]", q))
+    has_variable = bool(re.search(r"\b(?:x|y|z|a|b|n|r|p|q)\b", q))
+    has_numerical_verb = any(v in q for v in numerical_verbs)
+    theory_only_starts = ("explain the importance", "describe the importance", "discuss the importance", "what is the importance", "write a note on", "describe the concept", "explain the concept")
+    if q.startswith(theory_only_starts) and not (has_number or has_math_symbol):
+        return False
+    return has_number or has_math_symbol or has_numerical_verb or has_variable
+
 
 def generate_questions_from_chapter(
     chapter_title: str,
@@ -522,6 +528,7 @@ def generate_questions_from_chapter(
             f"Section {idx}: \"{s['name']}\" (Type: {s['type']}, Questions Needed: EXACTLY {s['question_count']}, {s['marks_per_question']} marks each, Length: {s.get('expected_length', 'Standard')})"
         )
     sec_prompt_str = "\n".join(sec_descriptions)
+    math_instructions = build_math_instructions(grade, difficulty) if is_mathematics_subject(subject, chapter_title) else ""
 
     prompt = f"""
 You are an expert educational curriculum designer and question paper creator.
@@ -536,11 +543,14 @@ CHAPTER METADATA:
 - Overall Difficulty Level: {difficulty}
 - Special Instructions: {special_instructions or "None"}
 
+{math_instructions}
+
 SECTIONS REQUIRED:
 {sec_prompt_str}
 
 RULES:
 - Base every single question and model answer directly on the provided chapter text below. Do NOT invent facts or characters.
+- If this is Mathematics, follow MATHEMATICS MODE exactly and never substitute theory questions for numerical problems.
 - Generate EXACTLY the requested question count for each section.
 - Every single question MUST have its OWN UNIQUE model answer answering that question and specific marking scheme.
 - Return ONLY a valid JSON object matching the EXACT JSON structure below.
@@ -577,7 +587,7 @@ REQUIRED JSON OUTPUT FORMAT:
     for attempt in range(2):
         res_text = call_groq_api(prompt, user_api_key)
         if res_text:
-            result = parse_and_validate_ai_response(res_text, active_sections, chapter_title, chapter_text)
+            result = parse_and_validate_ai_response(res_text, active_sections, chapter_title, chapter_text, subject)
             if result:
                 logger.info(f"Successfully generated {len(result['all_questions'])} questions via Groq/xAI API!")
                 return result
@@ -585,7 +595,7 @@ REQUIRED JSON OUTPUT FORMAT:
     # 2. Try Gemini REST API Provider
     res_text = call_gemini_api_rest(prompt, user_api_key)
     if res_text:
-        result = parse_and_validate_ai_response(res_text, active_sections, chapter_title, chapter_text)
+        result = parse_and_validate_ai_response(res_text, active_sections, chapter_title, chapter_text, subject)
         if result:
             logger.info(f"Successfully generated {len(result['all_questions'])} questions via Gemini REST API!")
             return result
@@ -604,14 +614,26 @@ REQUIRED JSON OUTPUT FORMAT:
                 response = model.generate_content(prompt)
                 raw_response = response.text
                 
-            result = parse_and_validate_ai_response(raw_response, active_sections, chapter_title, chapter_text)
+            result = parse_and_validate_ai_response(raw_response, active_sections, chapter_title, chapter_text, subject)
             if result:
                 logger.info(f"Successfully generated {len(result['all_questions'])} questions via Gemini SDK!")
                 return result
         except Exception as e:
             logger.error(f"Gemini API SDK error: {e}")
 
-    # 4. Smart Semantic Fallback Question Generator
+    # 4. Subject-aware fallback. Mathematics must never fall back to theory questions.
+    if is_mathematics_subject(subject, chapter_title):
+        logger.info("Executing Mathematics Numerical Fallback Generator...")
+        return generate_math_fallback_questions(
+            chapter_title=chapter_title,
+            chapter_text=chapter_text,
+            subject=subject,
+            grade=grade,
+            language=language,
+            difficulty=difficulty,
+            sections=active_sections
+        )
+
     logger.info("Executing Smart Semantic Fallback Question Generator for dynamic sections...")
     return generate_fallback_questions(
         chapter_title=chapter_title,
@@ -847,6 +869,87 @@ OUTPUT FORMAT: Return ONLY a JSON object with a single top-level key "answer_key
             
     return questions
 
+def generate_math_fallback_questions(
+    chapter_title: str,
+    chapter_text: str,
+    subject: str,
+    grade: str,
+    language: str = "English",
+    difficulty: str = "Medium",
+    sections: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Any]:
+    """Deterministic numerical fallback used when every AI provider is unavailable or returns theory."""
+    active_sections = normalize_sections_config(sections)
+    text = chapter_text.strip()
+
+    # Extract useful numeric values from the source so fallback questions remain grounded.
+    numbers = []
+    for raw in re.findall(r"(?<![A-Za-z])[-+]?\d+(?:\.\d+)?(?:%|\b)", text):
+        try:
+            value = float(re.sub(r"%$", "", raw))
+            if value not in numbers and abs(value) < 1000000:
+                numbers.append(value)
+        except ValueError:
+            pass
+    if not numbers:
+        numbers = [5.0, 8.0, 12.0, 15.0]
+
+    equations = re.findall(r"[^\n]{0,30}(?:[xy]\s*=|=\s*[xy]|\+|−|-|×|÷|\^)[^\n]{0,50}", text, flags=re.IGNORECASE)
+    source_hint = text[:180].replace("\n", " ").strip()
+
+    def fmt(n: float) -> str:
+        return str(int(n)) if n.is_integer() else str(n)
+
+    templates = [
+        (lambda a,b: f"Calculate {fmt(a)} + {fmt(b)}.", lambda a,b: f"{fmt(a)} + {fmt(b)} = {fmt(a+b)}."),
+        (lambda a,b: f"Calculate {fmt(a)} × {fmt(b)}.", lambda a,b: f"{fmt(a)} × {fmt(b)} = {fmt(a*b)}."),
+        (lambda a,b: f"Find {fmt(a)}% of {fmt(b)}.", lambda a,b: f"{fmt(a)}% of {fmt(b)} = ({fmt(a)}/100) × {fmt(b)} = {fmt(a*b/100)}."),
+        (lambda a,b: f"If x = {fmt(a)}, evaluate 2x + {fmt(b)}.", lambda a,b: f"Substitute x = {fmt(a)}: 2({fmt(a)}) + {fmt(b)} = {fmt(2*a+b)}."),
+        (lambda a,b: f"The length of a rectangle is {fmt(a)} cm and its breadth is {fmt(b)} cm. Calculate its area.", lambda a,b: f"Area = length × breadth = {fmt(a)} × {fmt(b)} = {fmt(a*b)} cm²."),
+    ]
+
+    all_questions, vs_list, sq_list, lq_list = [], [], [], []
+    global_num = 1
+    cursor = 0
+    for sec in active_sections:
+        for _ in range(sec["question_count"]):
+            a = numbers[cursor % len(numbers)]
+            b = numbers[(cursor + 1) % len(numbers)]
+            if b == 0:
+                b = 2.0
+            q_fn, ans_fn = templates[cursor % len(templates)]
+            q_text = q_fn(a, b)
+            ans = ans_fn(a, b)
+            marks = sec["marks_per_question"]
+            if marks >= 6:
+                q_text = f"Solve the following numerical problem and show all working: {q_text}"
+                ans = "Method/working: write the appropriate formula, substitute the given values, perform the calculation, and state the final result. " + ans
+            q_obj = {
+                "id": str(uuid.uuid4()),
+                "question_number": global_num,
+                "question_text": q_text,
+                "question_type": sec["type"],
+                "difficulty": sec.get("difficulty", difficulty),
+                "marks": marks,
+                "related_topic": f"Numerical application from {chapter_title}",
+                "section_name": sec["name"],
+                "answer": ans,
+                "marking_points": [f"Correct mathematical method/working ({max(1, marks-1)} marks)", f"Correct final answer ({1 if marks > 1 else marks} mark)"],
+                "expected_length": sec.get("expected_length", "Show working")
+            }
+            all_questions.append(q_obj)
+            if "Very Short" in sec["type"]:
+                vs_list.append(q_obj)
+            elif "Short" in sec["type"]:
+                sq_list.append(q_obj)
+            else:
+                lq_list.append(q_obj)
+            global_num += 1
+            cursor += 1
+
+    return {"very_short_questions": vs_list, "short_questions": sq_list, "long_questions": lq_list, "all_questions": all_questions, "sections": active_sections}
+
+
 def generate_fallback_questions(
     chapter_title: str,
     chapter_text: str,
@@ -984,8 +1087,6 @@ def generate_fallback_questions(
                 lq_list.append(q_obj)
 
             global_q_num += 1
-
-    attach_source_attributions_to_questions(all_questions, chapter_title, chapter_text)
 
     return {
         "very_short_questions": vs_list,
